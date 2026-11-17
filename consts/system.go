@@ -4,6 +4,7 @@ const (
 	HeaderToken     = "authorization_jwt"
 	Trace           = "trace"
 	ClientIp        = "client_ip"
+	AdminClientIp   = "admin_client_ip"
 	UserAgent       = "user_agent"
 	TokenUid        = "token_uid"
 	TokenUidRole    = "token_uid_role"
@@ -20,9 +21,9 @@ const (
 )
 
 const (
-	APP     = "app"
+	APP     = "APP"
 	IOS     = "IOS"
 	Android = "Android"
-	PC      = "pc"
-	H5      = "h5"
+	PC      = "PC"
+	H5      = "H5"
 )

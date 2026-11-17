@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+
 	"github.com/doubunv/common-pkg/aesGCM"
 	"github.com/doubunv/common-pkg/headInfo"
 	"github.com/doubunv/common-pkg/language"
 	"github.com/doubunv/common-pkg/result/xcode"
-	"net/http"
 
 	"github.com/zeromicro/go-zero/core/logc"
 	"github.com/zeromicro/go-zero/core/trace"
@@ -33,8 +34,9 @@ func interfaceToBytes(data interface{}) ([]byte, error) {
 
 func HttpSuccessResult(ctx context.Context, w http.ResponseWriter, resp interface{}) {
 	resp = language.SwitchLanguage(resp, headInfo.GetContentLanguage(ctx))
-	//logSucc, _ := json.Marshal(Success(resp, trace.TraceIDFromContext(ctx)))
-	//logc.Info(ctx, "ApiResponse:", fmt.Sprintf("%s", string(logSucc)))
+	// todo 不要打印
+	// logSucc, _ := json.Marshal(Success(resp, trace.TraceIDFromContext(ctx)))
+	// logc.Info(ctx, "ApiResponse:", fmt.Sprintf("%s", string(logSucc)))
 
 	if aesGCM.IsOpenAesGcm {
 		respByte, err := interfaceToBytes(resp)
@@ -57,18 +59,28 @@ func HttpSuccessResult(ctx context.Context, w http.ResponseWriter, resp interfac
 
 func HttpSuccessResultNotAes(ctx context.Context, w http.ResponseWriter, resp interface{}) {
 	resp = language.SwitchLanguage(resp, headInfo.GetContentLanguage(ctx))
-	//logSucc, _ := json.Marshal(Success(resp, trace.TraceIDFromContext(ctx)))
-	//logc.Info(ctx, "ApiResponse:", fmt.Sprintf("%s", string(logSucc)))
+	// todo 不要打印
+	// logSucc, _ := json.Marshal(Success(resp, trace.TraceIDFromContext(ctx)))
+	// logc.Info(ctx, "ApiResponse:", fmt.Sprintf("%s", string(logSucc)))
 	success := Success(resp, trace.TraceIDFromContext(ctx))
 	httpx.WriteJsonCtx(ctx, w, http.StatusOK, success)
 }
 
 func HttpErrorResult(ctx context.Context, w http.ResponseWriter, err error) {
+	httpErrorResultGeneric(ctx, w, err, http.StatusOK)
+}
+
+func httpErrorResultGeneric(ctx context.Context, w http.ResponseWriter, err error, statusCode int) {
 	var (
 		xerr xcode.XCode
 		code int
 		msg  string
 	)
+
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+
 	if errors.As(err, &xerr) {
 		code = xerr.Code()
 		msg = xerr.Error()
@@ -84,5 +96,5 @@ func HttpErrorResult(ctx context.Context, w http.ResponseWriter, err error) {
 	//	logc.Info(ctx, "ApiResponse:", string(logSuc))
 	//}()
 
-	httpx.WriteJsonCtx(ctx, w, http.StatusOK, language.SwitchLanguage(resp, headInfo.GetContentLanguage(ctx)))
+	httpx.WriteJsonCtx(ctx, w, statusCode, language.SwitchLanguage(resp, headInfo.GetContentLanguage(ctx)))
 }

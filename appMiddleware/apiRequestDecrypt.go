@@ -67,6 +67,7 @@ func (m *ApiRequestDecryptMiddleware) RequestDecrypt(r *http.Request) error {
 	if len(data) == 0 {
 		return nil
 	}
+
 	// Decrypt the data here
 	var decryptData RequestDecryptData
 	if err = json.Unmarshal(data, &decryptData); err != nil {

@@ -2,15 +2,30 @@ package headInfo
 
 import (
 	"context"
+	"strconv"
+	"strings"
+
 	"github.com/doubunv/common-pkg/consts"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/metadata"
-	"strconv"
-	"strings"
 )
 
 func GetTrace(ctx context.Context) string {
 	return trace.SpanContextFromContext(ctx).TraceID().String()
+}
+
+//
+//func SetTrace(ctx context.Context, value string) context.Context {
+//	md := ctxMd.SetMdCtxFromOut(ctx, consts.Trace, value)
+//	ctx = metadata.NewOutgoingContext(ctx, md)
+//	return ctx
+//}
+
+func SetTrace(ctx context.Context, value string) context.Context {
+	md, _ := metadata.FromOutgoingContext(ctx)
+	md = md.Copy()
+	md.Set(consts.Trace, value)
+	return metadata.NewOutgoingContext(ctx, md)
 }
 
 func GetTokenUid(ctx context.Context) int64 {
@@ -54,6 +69,14 @@ func GetClientIp(ctx context.Context) string {
 	res := strings.Join(md.Get(consts.ClientIp), "")
 	return res
 }
+func GetAdminClientIp(ctx context.Context) string {
+	md, ok := metadata.FromOutgoingContext(ctx)
+	if !ok {
+		return ""
+	}
+	res := strings.Join(md.Get(consts.AdminClientIp), "")
+	return res
+}
 func GetUserAgent(ctx context.Context) string {
 	md, ok := metadata.FromOutgoingContext(ctx)
 	if !ok {
@@ -81,18 +104,18 @@ func GetSource(ctx context.Context) string {
 	return res
 }
 
+//func SetTokenUid(ctx context.Context, value string) context.Context {
+//	md := ctxMd.SetMdCtxFromOut(ctx, consts.TokenUid, value)
+//	ctx = metadata.NewOutgoingContext(ctx, md)
+//	return ctx
+//}
+
 func SetTokenUid(ctx context.Context, value string) context.Context {
 	md, _ := metadata.FromOutgoingContext(ctx)
 	md = md.Copy()
 	md.Set(consts.TokenUid, value)
 	return metadata.NewOutgoingContext(ctx, md)
 }
-
-//func SetTokenUid(ctx context.Context, value string) context.Context {
-//	md := ctxMd.SetMdCtxFromOut(ctx, consts.TokenUid, value)
-//	ctx = metadata.NewOutgoingContext(ctx, md)
-//	return ctx
-//}
 
 func GetTrance(ctx context.Context) string {
 	return trace.SpanContextFromContext(ctx).TraceID().String()
@@ -116,6 +139,12 @@ func GetBusinessCode(ctx context.Context) string {
 	return res
 }
 
+//func SetBusinessCode(ctx context.Context, value string) context.Context {
+//	md := ctxMd.SetMdCtxFromOut(ctx, consts.BusinessCode, value)
+//	ctx = metadata.NewOutgoingContext(ctx, md)
+//	return ctx
+//}
+
 func SetBusinessCode(ctx context.Context, value string) context.Context {
 	md, _ := metadata.FromOutgoingContext(ctx)
 	md = md.Copy()
@@ -123,11 +152,19 @@ func SetBusinessCode(ctx context.Context, value string) context.Context {
 	return metadata.NewOutgoingContext(ctx, md)
 }
 
-//func SetBusinessCode(ctx context.Context, value string) context.Context {
-//	md := ctxMd.SetMdCtxFromOut(ctx, consts.BusinessCode, value)
-//	ctx = metadata.NewOutgoingContext(ctx, md)
-//	return ctx
-//}
+func SetBothBusinessCode(ctx context.Context, value string) context.Context {
+	incomingMD, _ := metadata.FromIncomingContext(ctx)
+	incomingMD = incomingMD.Copy()
+	incomingMD.Set(consts.BusinessCode, value)
+	ctx = metadata.NewIncomingContext(ctx, incomingMD)
+
+	outgoingMD, _ := metadata.FromOutgoingContext(ctx)
+	outgoingMD = outgoingMD.Copy()
+	outgoingMD.Set(consts.BusinessCode, value)
+	ctx = metadata.NewOutgoingContext(ctx, outgoingMD)
+
+	return ctx
+}
 
 func GetBusiness(ctx context.Context) string {
 	md, ok := metadata.FromOutgoingContext(ctx)
@@ -181,7 +218,7 @@ func GetDeviceId(ctx context.Context) string {
 	return res
 }
 
-func GetReqPath(ctx context.Context) string {
+func GetPath(ctx context.Context) string {
 	md, ok := metadata.FromOutgoingContext(ctx)
 	if !ok {
 		return ""

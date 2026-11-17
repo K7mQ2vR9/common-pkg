@@ -28,6 +28,7 @@ type RedisConf struct {
 	Password           string `json:",optional"`
 	DB                 int    `json:",optional"`
 	InsecureSkipVerify bool   `json:",optional"`
+	Type               string `json:",default=node,options=node|cluster"`
 }
 
 type ConfigAppServer struct {

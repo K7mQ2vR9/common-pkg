@@ -1,24 +1,28 @@
 package appMiddleware
 
 import (
+	"net/http"
+	"strconv"
+	"strings"
+
 	"github.com/doubunv/common-pkg/consts"
 	"github.com/doubunv/common-pkg/ctxMd"
 	"github.com/doubunv/common-pkg/headInfo"
 	"github.com/doubunv/common-pkg/result/xcode"
 	"google.golang.org/grpc/metadata"
-	"net/http"
-	"strconv"
-	"strings"
 )
 
-type CheckRequestTokenFunc func(r *http.Request, token string) int64
+type (
+	CheckRequestTokenFuncWithErr func(r *http.Request, token string) (int64, error)
+	CheckRequestTokenFunc        func(r *http.Request, token string) int64
+)
 
 func verifyPath(urlPath string, noVerifyPath map[string]int) bool {
 	if _, ok := noVerifyPath[urlPath]; ok {
 		return true
 	}
 
-	for path, _ := range noVerifyPath {
+	for path := range noVerifyPath {
 		if strings.HasPrefix(path, "/") && strings.HasSuffix(path, "*") {
 			prefix := strings.TrimSuffix(path, "*")
 			if strings.HasPrefix(urlPath, prefix) {
@@ -31,8 +35,8 @@ func verifyPath(urlPath string, noVerifyPath map[string]int) bool {
 
 func MustAuthTokenRequest(r *http.Request, checkToken CheckRequestTokenFunc, noVerifyPath map[string]int) (*http.Request, error) {
 	ctx := r.Context()
-	token := headInfo.GetJwtToken(ctx)
 
+	token := strings.Trim(r.Header.Get(consts.HeaderToken), "")
 	wPathBool := verifyPath(r.URL.Path, noVerifyPath)
 	if !wPathBool && token == "" {
 		return r, xcode.UserNotFound
@@ -48,6 +52,45 @@ func MustAuthTokenRequest(r *http.Request, checkToken CheckRequestTokenFunc, noV
 			ctx = metadata.NewOutgoingContext(ctx, md)
 		} else {
 			if !wPathBool {
+				if tokenUid == -1 {
+					return r, xcode.TokenPermissionDeniedWithMsg(headInfo.GetPath(ctx))
+				}
+				return r, xcode.TokenInvalid
+			}
+		}
+	}
+
+	newReq := r.WithContext(ctx)
+
+	return newReq, nil
+}
+
+func MustAuthTokenRequestWithErr(r *http.Request, checkToken CheckRequestTokenFuncWithErr, noVerifyPath map[string]int) (*http.Request, error) {
+	ctx := r.Context()
+
+	token := strings.Trim(r.Header.Get(consts.HeaderToken), "")
+	wPathBool := verifyPath(r.URL.Path, noVerifyPath)
+	if !wPathBool && token == "" {
+		return r, xcode.TokenNotLoginWithMsg("User not login.")
+	}
+
+	if token != "" {
+		var tokenUid int64 = 0
+		var err error
+		if checkToken != nil {
+			tokenUid, err = checkToken(r, token)
+			if err != nil {
+				return r, xcode.TokenSpecial(err)
+			}
+		}
+		if tokenUid > 0 {
+			md := ctxMd.SetMdCtxFromOut(ctx, consts.TokenUid, strconv.FormatInt(tokenUid, 10))
+			ctx = metadata.NewOutgoingContext(ctx, md)
+		} else {
+			if !wPathBool {
+				if tokenUid == -1 {
+					return r, xcode.TokenPermissionDeniedWithMsg(headInfo.GetPath(ctx))
+				}
 				return r, xcode.TokenInvalid
 			}
 		}

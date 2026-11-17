@@ -3,12 +3,13 @@ package headInfo
 import (
 	"context"
 	"encoding/json"
-	"github.com/doubunv/common-pkg/consts"
-	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/grpc/metadata"
 	"net"
 	"net/http"
 	"strings"
+
+	"github.com/doubunv/common-pkg/consts"
+	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/zeromicro/go-zero/core/logx"
 )
@@ -20,6 +21,7 @@ type Head struct {
 	Version          string `json:"version"`           // APP版本
 	Source           string `json:"source"`            // 来源渠道
 	ClientIp         string `json:"client_ip"`         // 客户端IP
+	AdminClientIp    string `json:"admin_client_ip"`   // 管理后台域名商IP
 	Trace            string `json:"trace"`             // 链路路由
 	TokenUid         string `json:"token_uid"`         // 用户ID
 	ReqPath          string `json:"req_path"`          // 请求path
@@ -40,6 +42,7 @@ func GetHead(r *http.Request) *Head {
 		Version:          strings.Trim(header.Get(consts.Version), " "),
 		Source:           strings.Trim(header.Get(consts.Source), " "),
 		ClientIp:         getClientIP(r),
+		AdminClientIp:    getAdminClientIPS(r),
 		Trace:            getTraceId(r),
 		ReqPath:          r.URL.Path,
 		Business:         strings.Trim(header.Get(consts.Business), " "),
@@ -50,7 +53,7 @@ func GetHead(r *http.Request) *Head {
 		ReqOrigin:        strings.Trim(header.Get("Origin"), " "),
 		Timezone:         strings.Trim(header.Get(consts.Timezone), " "),
 		UserAgent:        strings.Trim(header.Get("user-agent"), ""),
-		DeviceId:         strings.Trim(header.Get(consts.ContentLanguage), ""),
+		DeviceId:         strings.Trim(header.Get(consts.DeviceId), ""),
 	}
 }
 
@@ -69,6 +72,7 @@ func ContextHeadInLog(ctx context.Context, h *Head) context.Context {
 		logx.Field(consts.Version, h.Version),
 		logx.Field(consts.Source, h.Source),
 		logx.Field(consts.ClientIp, h.ClientIp),
+		logx.Field(consts.AdminClientIp, h.AdminClientIp),
 		logx.Field(consts.Trace, h.Trace),
 		logx.Field(consts.TokenUid, h.TokenUid),
 		logx.Field(consts.ReqPath, h.ReqPath),
@@ -95,18 +99,81 @@ func getTraceId(r *http.Request) string {
 	return traceId
 }
 
+// /////////////////////////////////////
+var adminClientIPHeaders = []string{
+	"CF-Connecting-IP", //CLOUDFLARE
+}
+
+func getAdminClientIP(r *http.Request) string {
+	for _, header := range adminClientIPHeaders {
+		if ip := getIPFromHeader(r, header); ip != "" {
+			return ip
+		}
+	}
+	return normalizeIP(r.RemoteAddr)
+}
+
+func getAdminClientIPS(r *http.Request) string {
+	return r.Header.Get("X-Forwarded-For")
+}
+
+///////////////////////////////////////
+
+var clientIPHeaders = []string{
+	"CF-Connecting-IP", //CLOUDFLARE
+	"TZ-Connecting-IP", //自定义
+	"X-Real-IP",
+	"X-Forwarded-For",
+}
+
 func getClientIP(r *http.Request) string {
-	ip := r.Header.Get("X-Forwarded-For")
-	if ip != "" {
-		ip = strings.Split(ip, ",")[0]
+	for _, header := range clientIPHeaders {
+		if ip := getIPFromHeader(r, header); ip != "" {
+			return ip
+		}
 	}
-	if ip == "" {
-		ip = r.Header.Get("X-Real-Ip")
+	return normalizeIP(r.RemoteAddr)
+}
+
+func getIPFromHeader(r *http.Request, header string) string {
+	for _, value := range r.Header.Values(header) {
+		// X-Forwarded-For 可能是：
+		// client, proxy1, proxy2
+		first, _, _ := strings.Cut(value, ",")
+
+		if ip := normalizeIP(first); ip != "" {
+			return ip
+		}
 	}
-	if ip == "" {
-		ip, _, _ = net.SplitHostPort(r.RemoteAddr)
+
+	return ""
+}
+
+func normalizeIP(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
 	}
-	return ip
+
+	// 处理 IPv4:port 和 [IPv6]:port。
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+
+	// 兼容没有端口但包含方括号的 IPv6。
+	value = strings.Trim(value, "[]")
+
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return ""
+	}
+
+	// 返回标准格式，同时处理 IPv4-mapped IPv6。
+	if ipv4 := ip.To4(); ipv4 != nil {
+		return ipv4.String()
+	}
+
+	return ip.String()
 }
 
 func GetFullHead(r *http.Request) map[string][]string {
@@ -124,6 +191,7 @@ func HeadInMetadata(ctx context.Context, h Head) context.Context {
 		consts.HeaderToken, h.AuthorizationJwt,
 		consts.TokenUid, h.TokenUid,
 		consts.ClientIp, h.ClientIp,
+		consts.AdminClientIp, h.AdminClientIp,
 		consts.ReqPath, h.ReqPath,
 		consts.Version, h.Version,
 		consts.Source, h.Source,
