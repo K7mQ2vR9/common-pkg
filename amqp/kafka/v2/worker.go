@@ -3,29 +3,34 @@ package v2
 import (
 	"context"
 	"errors"
-	"github.com/segmentio/kafka-go"
-	"github.com/zeromicro/go-zero/core/logc"
+	"fmt"
 	"runtime/debug"
 	"time"
+
+	"github.com/segmentio/kafka-go"
+	"github.com/zeromicro/go-zero/core/logc"
 )
 
 type partitionWorker struct {
-	partition     int
-	ch            chan kafka.Message
-	reader        *kafka.Reader
-	maxRetry      int
-	batchSize     int
-	flushInterval time.Duration
-	batchHandler  BatchMessageHandler
-	singleHandler MessageHandler
-	dlqHandler    DLQHandler
+	partition      int
+	ch             chan kafka.Message
+	commitMessages func(context.Context, ...kafka.Message) error
+	maxRetry       int
+	batchSize      int
+	flushInterval  time.Duration
+	batchHandler   BatchMessageHandler
+	singleHandler  MessageHandler
+	dlqHandler     DLQHandler
 
-	batch []kafka.Message
+	batch     []kafka.Message
+	processed int   // 批次中已处理、尚未确认提交的连续前缀。
+	fallback  bool  // 批量处理已结束，剩余消息按顺序逐条处理。
+	dlqReason error // 首条未处理消息已耗尽业务重试，后续只重试死信投递。
 }
 
 func newPartitionWorker(
 	partition int,
-	reader *kafka.Reader,
+	commitMessages func(context.Context, ...kafka.Message) error,
 	maxRetry int,
 	buffer int,
 	batchSize int,
@@ -35,177 +40,188 @@ func newPartitionWorker(
 	dlqHandler DLQHandler,
 ) *partitionWorker {
 	return &partitionWorker{
-		partition:     partition,
-		ch:            make(chan kafka.Message, buffer),
-		reader:        reader,
-		maxRetry:      maxRetry,
-		batchSize:     batchSize,
-		flushInterval: flushInterval,
-		batchHandler:  batchHandler,
-		singleHandler: singleHandler,
-		dlqHandler:    dlqHandler,
-		batch:         make([]kafka.Message, 0, batchSize),
+		partition:      partition,
+		ch:             make(chan kafka.Message, buffer),
+		commitMessages: commitMessages,
+		maxRetry:       maxRetry,
+		batchSize:      batchSize,
+		flushInterval:  flushInterval,
+		batchHandler:   batchHandler,
+		singleHandler:  singleHandler,
+		dlqHandler:     dlqHandler,
+		batch:          make([]kafka.Message, 0, batchSize),
 	}
 }
 
-func (w *partitionWorker) run(ctx context.Context) {
+func (w *partitionWorker) run(ctx context.Context, draining <-chan struct{}) {
 	ticker := time.NewTicker(w.flushInterval)
 	defer ticker.Stop()
 
 	logc.Infof(ctx, "partition worker started, partition=%d", w.partition)
-
-	for {
+	input := (<-chan kafka.Message)(w.ch)
+	blocked := false
+	for ctx.Err() == nil && (input != nil || blocked) {
+		messages := input
+		var retryOnDrain <-chan struct{}
+		if blocked {
+			// 保留当前批次的边界，避免故障期间累积消息或将新消息混入逐条回退。
+			messages = nil
+			retryOnDrain = draining
+		}
 		select {
 		case <-ctx.Done():
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if err := w.flush(shutdownCtx); err != nil {
-				logc.Errorf(ctx, "flush on ctx done failed, partition=%d err=%v", w.partition, err)
-			}
-			cancel()
-			logc.Infof(ctx, "partition worker stopped by context, partition=%d", w.partition)
 			return
-
+		case <-retryOnDrain:
+			draining = nil
+			blocked = w.flushWithLog(ctx) != nil
 		case <-ticker.C:
-			if err := w.flush(ctx); err != nil {
-				logc.Errorf(ctx, "flush by ticker failed, partition=%d err=%v", w.partition, err)
-			}
-
-		case msg, ok := <-w.ch:
+			blocked = w.flushWithLog(ctx) != nil
+		case msg, ok := <-messages:
 			if !ok {
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				if err := w.flush(shutdownCtx); err != nil {
-					logc.Errorf(ctx, "flush on channel close failed, partition=%d err=%v", w.partition, err)
-				}
-				cancel()
-				logc.Infof(ctx, "partition worker channel closed, partition=%d", w.partition)
-				return
+				input = nil
+				blocked = w.flushWithLog(ctx) != nil
+				continue
 			}
-
 			w.batch = append(w.batch, msg)
 			if len(w.batch) >= w.batchSize {
-				if err := w.flush(ctx); err != nil {
-					logc.Errorf(ctx, "flush by batch size failed, partition=%d err=%v", w.partition, err)
-				}
+				blocked = w.flushWithLog(ctx) != nil
 			}
 		}
 	}
 }
 
-func (w *partitionWorker) flush(ctx context.Context) error {
-	if len(w.batch) == 0 {
-		return nil
-	}
-
-	msgs := make([]kafka.Message, len(w.batch))
-	copy(msgs, w.batch)
-	needCommit, err := w.handleBatch(ctx, msgs)
+func (w *partitionWorker) flushWithLog(ctx context.Context) error {
+	err := w.flush(ctx)
 	if err != nil {
+		logc.Errorf(ctx, "Kafka batch is pending, partition=%d err=%v", w.partition, err)
+	}
+	return err
+}
+
+func (w *partitionWorker) flush(ctx context.Context) error {
+	// 恢复时优先提交上次已处理的前缀，避免重复执行业务或写入死信。
+	if err := w.commitProcessed(ctx); err != nil || len(w.batch) == 0 {
 		return err
 	}
-	w.batch = w.batch[:0]
 
-	if needCommit {
-		return w.commitLast(ctx, msgs[len(msgs)-1], len(msgs))
+	processingErr := w.processBatch(ctx)
+	commitErr := w.commitProcessed(ctx)
+	return errors.Join(processingErr, commitErr)
+}
+
+func (w *partitionWorker) processBatch(ctx context.Context) error {
+	if !w.fallback && w.batchHandler != nil {
+		batch := append([]kafka.Message(nil), w.batch...)
+		err := w.retryHandler(ctx, func() error { return w.batchHandler(ctx, batch) })
+		if err == nil {
+			w.processed = len(w.batch)
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		logc.Errorf(ctx, "Kafka batch handler failed, falling back to single messages, partition=%d err=%v", w.partition, err)
+	}
+	w.fallback = true
+	for w.processed < len(w.batch) {
+		msg := w.batch[w.processed]
+		if err := w.processSingle(ctx, msg); err != nil {
+			return fmt.Errorf("Kafka message at offset %d is pending: %w", msg.Offset, err)
+		}
+		w.processed++
 	}
 	return nil
 }
 
-func (w *partitionWorker) handleBatch(ctx context.Context, msgs []kafka.Message) (needCommit bool, err error) {
-
-	if w.batchHandler == nil {
-		return false, errors.New("batchHandler is nil")
+func (w *partitionWorker) processSingle(ctx context.Context, msg kafka.Message) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-
-	defer func() {
-		if r := recover(); r != nil {
-			err = errors.New("panic in batch handler")
-			logc.Errorf(ctx, "panic recovered in batch handler, partition=%d panic=%v stack=%s", w.partition, r, debug.Stack())
-		}
-	}()
-
-	for i := 1; i <= w.maxRetry; i++ {
-		err = w.batchHandler(ctx, msgs)
-		if err == nil {
-			return true, nil
-		}
-
-		backoff := retryBackoff(i)
-		logc.Errorf(ctx,
-			"batch handle failed, partition=%d retry=%d/%d batch_size=%d err=%v backoff=%s",
-			w.partition, i, w.maxRetry, len(msgs), err, backoff,
-		)
-		if !sleepWithContext(ctx, backoff) {
-			return false, ctx.Err()
+	if w.dlqReason == nil {
+		if w.singleHandler == nil {
+			w.dlqReason = errors.New("Kafka batch failed and no single handler is configured")
+		} else {
+			err := w.retryHandler(ctx, func() error { return w.singleHandler(ctx, msg) })
+			if err == nil {
+				return nil
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			w.dlqReason = err
 		}
 	}
 
-	logc.Errorf(ctx, "batch handle failed finally, fallback to single, partition=%d batch_size=%d last_err=%v", w.partition, len(msgs), err)
-	var failed int
-	for _, msg := range msgs {
-		if singleErr := w.handleSingle(ctx, msg); singleErr != nil {
-			failed++
-			logc.Errorf(ctx, "single handle failed after fallback, partition=%d offset=%d err=%v", msg.Partition, msg.Offset, singleErr)
-		}
+	if err := invokeHandler(ctx, func() error { return w.dlqHandler(ctx, msg, w.dlqReason) }); err != nil {
+		return err
 	}
-	//if failed > 0 {
-	//	return false, errors.New("fallback single handle partially failed")
-	//}
-	return false, nil
+	w.dlqReason = nil
+	return nil
 }
 
-func (w *partitionWorker) handleSingle(ctx context.Context, msg kafka.Message) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			panicErr := errors.New("panic in single handler")
-			logc.Errorf(ctx, "panic recovered in single handler, partition=%d offset=%d panic=%v stack=%s", msg.Partition, msg.Offset, r, debug.Stack())
-			if dlqErr := w.dlqHandler(ctx, msg, panicErr); dlqErr != nil {
-				err = dlqErr
-				return
-			}
-			err = w.commitLast(ctx, msg, 1)
-		}
-	}()
-
-	if w.singleHandler == nil {
-		if dlqErr := w.dlqHandler(ctx, msg, errors.New("batch failed and single handler is nil")); dlqErr != nil {
-			return dlqErr
-		}
-		return w.commitLast(ctx, msg, 1)
+func (w *partitionWorker) commitProcessed(ctx context.Context) error {
+	if w.processed == 0 {
+		return nil
+	}
+	last := w.batch[w.processed-1]
+	if err := w.commitLast(ctx, last, w.processed); err != nil {
+		return fmt.Errorf("commit Kafka offset %d: %w", last.Offset, err)
 	}
 
-	for i := 1; i <= w.maxRetry; i++ {
-		err = w.singleHandler(ctx, msg)
-		if err == nil {
-			return w.commitLast(ctx, msg, 1)
-		}
-
-		backoff := retryBackoff(i)
-		logc.Errorf(ctx, "single handle failed, partition=%d offset=%d retry=%d/%d err=%v backoff=%s", msg.Partition, msg.Offset, i, w.maxRetry, err, backoff)
-
-		if !sleepWithContext(ctx, backoff) {
-			return ctx.Err()
-		}
+	// 只有 broker 确认后才移除已处理的前缀，未处理后缀和死信重试状态继续保留。
+	remaining := copy(w.batch, w.batch[w.processed:])
+	clear(w.batch[remaining:])
+	w.batch = w.batch[:remaining]
+	w.processed = 0
+	if remaining == 0 {
+		w.fallback = false
 	}
-
-	if dlqErr := w.dlqHandler(ctx, msg, err); dlqErr != nil {
-		return dlqErr
-	}
-	return w.commitLast(ctx, msg, 1)
+	return nil
 }
 
 func (w *partitionWorker) commitLast(ctx context.Context, msg kafka.Message, batchCount int) error {
 	var err error
 	for i := 0; i < 3; i++ {
-		err = w.reader.CommitMessages(ctx, msg)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err = w.commitMessages(ctx, msg)
 		if err == nil {
 			logc.Debugf(ctx, "commit success, partition=%d offset=%d batch_count=%d", msg.Partition, msg.Offset, batchCount)
 			return nil
 		}
-		if !sleepWithContext(ctx, time.Duration(i+1)*200*time.Millisecond) {
+		if i < 2 && !sleepWithContext(ctx, time.Duration(i+1)*200*time.Millisecond) {
 			return ctx.Err()
 		}
 	}
 	return err
+}
+
+func (w *partitionWorker) retryHandler(ctx context.Context, handler func() error) error {
+	var err error
+	for i := 1; i <= w.maxRetry; i++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err = invokeHandler(ctx, handler)
+		if err == nil {
+			return nil
+		}
+		if i < w.maxRetry && !sleepWithContext(ctx, retryBackoff(i)) {
+			return ctx.Err()
+		}
+	}
+	return err
+}
+
+func invokeHandler(ctx context.Context, handler func() error) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("Kafka handler panicked")
+			logc.Errorf(ctx, "%s\n%s", err, debug.Stack())
+		}
+	}()
+	return handler()
 }
 
 func retryBackoff(n int) time.Duration {
