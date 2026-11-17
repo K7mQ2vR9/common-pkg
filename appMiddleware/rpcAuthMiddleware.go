@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"runtime/debug"
 
-	"github.com/doubunv/common-pkg/consts"
-	"github.com/doubunv/common-pkg/headInfo"
-	"github.com/doubunv/common-pkg/result/xcode"
+	"github.com/K7mQ2vR9/base-pkg/consts"
+	"github.com/K7mQ2vR9/base-pkg/headInfo"
+	"github.com/K7mQ2vR9/base-pkg/result/xcode"
 	"github.com/zeromicro/go-zero/core/logc"
 	"github.com/zeromicro/go-zero/core/logx"
 	"google.golang.org/grpc"

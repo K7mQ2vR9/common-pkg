@@ -3,8 +3,8 @@ package test
 import (
 	"context"
 	"fmt"
-	"github.com/doubunv/common-pkg/es/esaws/core"
-	"github.com/doubunv/common-pkg/es/esaws/model"
+	"github.com/K7mQ2vR9/base-pkg/es/esaws/core"
+	"github.com/K7mQ2vR9/base-pkg/es/esaws/model"
 	"os"
 	"strings"
 	"testing"

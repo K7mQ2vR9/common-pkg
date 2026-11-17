@@ -1,9 +1,9 @@
 package appMiddleware
 
 import (
-	"github.com/doubunv/common-pkg/headInfo"
-	"github.com/doubunv/common-pkg/result"
-	"github.com/doubunv/common-pkg/result/xcode"
+	"github.com/K7mQ2vR9/base-pkg/headInfo"
+	"github.com/K7mQ2vR9/base-pkg/result"
+	"github.com/K7mQ2vR9/base-pkg/result/xcode"
 	"net/http"
 )
 

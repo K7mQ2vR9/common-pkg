@@ -2,10 +2,11 @@ package headInfo
 
 import (
 	"context"
+	"net/netip"
 	"strconv"
 	"strings"
 
-	"github.com/doubunv/common-pkg/consts"
+	"github.com/K7mQ2vR9/base-pkg/consts"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/metadata"
 )
@@ -74,8 +75,15 @@ func GetAdminClientIp(ctx context.Context) string {
 	if !ok {
 		return ""
 	}
-	res := strings.Join(md.Get(consts.AdminClientIp), "")
-	return res
+	values := md.Get(consts.AdminClientIp)
+	if len(values) != 1 {
+		return ""
+	}
+	ip, err := netip.ParseAddr(values[0])
+	if err != nil || ip.Zone() != "" {
+		return ""
+	}
+	return ip.Unmap().String()
 }
 func GetUserAgent(ctx context.Context) string {
 	md, ok := metadata.FromOutgoingContext(ctx)

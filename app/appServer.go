@@ -1,8 +1,8 @@
 package app
 
 import (
-	"github.com/doubunv/common-pkg/dbM"
-	"github.com/doubunv/common-pkg/logs"
+	"github.com/K7mQ2vR9/base-pkg/dbM"
+	"github.com/K7mQ2vR9/base-pkg/logs"
 	"github.com/sirupsen/logrus"
 	"github.com/zeromicro/go-zero/core/logx"
 )
@@ -32,7 +32,8 @@ type RedisConf struct {
 }
 
 type ConfigAppServer struct {
-	IsDebug   bool                 `json:",optional,default=false"`
-	SelectDb  []dbM.SelectDbConfig `json:",optional"`
-	RedisConf *RedisConf           `json:",optional"`
+	IsDebug           bool                 `json:",optional,default=false"`
+	SelectDb          []dbM.SelectDbConfig `json:",optional"`
+	RedisConf         *RedisConf           `json:",optional"`
+	TrustedProxyCIDRs []string             `json:",optional"`
 }

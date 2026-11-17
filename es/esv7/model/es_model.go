@@ -5,9 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/doubunv/common-pkg/commonTool"
-	"github.com/doubunv/common-pkg/es/esv7"
-	"github.com/doubunv/common-pkg/es/esv7/core"
+	"github.com/K7mQ2vR9/base-pkg/commonTool"
+	"github.com/K7mQ2vR9/base-pkg/es/esv7"
+	"github.com/K7mQ2vR9/base-pkg/es/esv7/core"
 	"github.com/elastic/go-elasticsearch/v7/esapi"
 	"strings"
 )

@@ -16,8 +16,8 @@
 
 ## 当前基线
 
-- 分支为 `pre`，建档时的提交为 `2b03a40`。第 1 项代码变更仍在工作区。
-- Go 模块当前声明为 `github.com/doubunv/common-pkg`。正式发布路径和版本号待第 7 项处理。
+- 建档基线为 `pre` 分支上的 `2b03a40`。
+- Go 模块声明为 `github.com/K7mQ2vR9/base-pkg`。本地开发目录仍为 `common-pkg/`，远端仓库和发布版本待第 7 项处理。
 
 ## 待办与进度
 
@@ -25,11 +25,11 @@
 |---|---|---|
 | 1 | JWT 签发、验签和刷新校验 | 已修改、验证并确认 |
 | 2 | 删除源码与仓库中的历史凭证，确认轮换范围 | 工作区清理已验证并确认，部署凭证用途待核对 |
-| 3 | 请求与 RPC 日志中的凭证脱敏 | 已修改并验证，待确认 |
-| 4 | 客户端 IP 的可信代理校验 | 待处理 |
+| 3 | 请求与 RPC 日志中的凭证脱敏 | 已修改、验证并确认 |
+| 4 | 客户端 IP 的可信代理校验 | 已修改并验证，待确认 |
 | 5 | Kafka v2 死信处理和位点提交 | 待处理 |
 | 6 | Kafka v2 消费和关闭流程 | 待处理 |
-| 7 | Go 模块路径与独立发版 | 待处理 |
+| 7 | Go 模块路径与独立发版 | 模块路径已按用户要求修改并验证，远端及发版待处理 |
 | 8 | 认证中间件的回调、白名单和错误处理 | 待处理 |
 | 9 | 统一响应和特殊错误匹配 | 待处理 |
 | 10 | 多语言转换和 JSON 序列化兼容 | 待处理 |
@@ -72,3 +72,20 @@
 - **验证** 使用临时 Go overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -v ./appMiddleware -run '^Test(HTTPLogRedaction|RPCMetadataLogRedaction)$' -count=1`，两项通过。覆盖 `Head.String()`、HTTP 认证及日志字段、RPC 日志允许列表及原始 metadata 保留。测试使用内存请求和模拟凭证，启动时提示缺少 `etc/language`，未执行外部服务联调。`go build -mod=readonly -buildvcs=false ./...` 和 `git diff --check` 通过。
 - **测试清理** 登记结果后已删除临时测试用例、overlay 配置和构建缓存，并核对工作区无本次新增的测试文件。
 - **下一步** 等用户确认第 3 项后处理第 4 项可信代理校验。
+
+### 2026-11-17 / DEV-20261117-005 / 第 4 项客户端 IP 可信代理校验
+
+- **进度** 用户要求进入下一项，第 3 项记为已确认。第 4 项已修改并验证，等待确认。
+- **改动** HTTP 入口默认使用连接对端 IP。仅当对端命中已配置的可信代理 CIDR 时，从右向左检查 `X-Forwarded-For` 链，取第一个不可信的有效 IP。若整条链均为可信节点，则取最左侧有效 IP。可信段内出现无效内容时回退到连接对端。`ClientIp` 和 `AdminClientIp` 都使用同一解析结果，`GetAdminClientIp` 拒绝包含多个地址或格式无效的 metadata。
+- **接入** 可在 `app.ConfigAppServer` 中配置 `TrustedProxyCIDRs`，调用 `app.WithTrustedProxyCIDRs(config.TrustedProxyCIDRs)` 检查错误后，将返回的选项传入 `app.NewServerMiddleware`。单独使用 HTTP 头中间件时可调用 `appMiddleware.WithTrustedProxyCIDRs`。只配置会在 `X-Forwarded-For` 末尾追加连接对端 IP 的代理。IP 解析采用 `X-Forwarded-For`，原有 `CF-Connecting-IP`、`TZ-Connecting-IP` 和 `X-Real-IP` 不参与取值。
+- **验证** 使用临时 Go overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -v ./app -run '^Test(TrustedProxyResolution|TrustedProxyMiddlewareConfiguration|AdminClientIPMetadata)$' -count=1`，三组通过。覆盖默认直连、可信与不可信对端、多级与多行转发链、IPv6、IPv4 映射地址、异常链回退、配置校验及 HTTP metadata 传递。`go build -mod=readonly -buildvcs=false ./...` 和 `git diff --check` 通过。测试使用内存请求，启动时提示缺少 `etc/language`，未连接实际代理或变更部署配置。
+- **测试清理** 登记结果后已删除临时测试用例、overlay 配置和构建缓存，并核对工作区无本次新增的测试文件。
+- **下一步** 等用户确认第 4 项后处理第 5 项 Kafka v2 死信和位点提交。
+
+### 2026-11-17 / DEV-20261117-006 / 更新公共包 Go 模块路径
+
+- **用户要求** 将 `headInfo` 的导入路径改为 `github.com/K7mQ2vR9/base-pkg/headInfo`。
+- **改动** 将 `go.mod` 的模块路径改为 `github.com/K7mQ2vR9/base-pkg`，同步更新包内 Go 源码和现有测试的导入路径。正式发布仍待处理。
+- **验证** `go list -mod=readonly -f '{{.ImportPath}}' ./headInfo` 返回新路径。`go build -mod=readonly -buildvcs=false ./...` 通过。`go test -mod=readonly -buildvcs=false ./... -run '^$' -count=1` 编译了测试包，未执行测试用例。独立临时 Go 模块通过本地 `replace` 导入并调用新路径的 `headInfo.GetHead`，运行通过。`git diff --check` 通过。
+- **测试清理** 登记验证结果后删除临时导入验证模块及构建缓存。核对工作区无本次新增的测试文件。
+- **限制与下一步** 本次验证使用本地源码，Git `origin` 仍为 `github.com/K7mQ2vR9/common-pkg`。远端仓库和版本发布未调整，尚未验证通过 GitHub 下载新模块。第 4 项仍等待确认。

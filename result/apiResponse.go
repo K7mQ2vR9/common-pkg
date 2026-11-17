@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/doubunv/common-pkg/aesGCM"
-	"github.com/doubunv/common-pkg/headInfo"
-	"github.com/doubunv/common-pkg/language"
-	"github.com/doubunv/common-pkg/result/xcode"
+	"github.com/K7mQ2vR9/base-pkg/aesGCM"
+	"github.com/K7mQ2vR9/base-pkg/headInfo"
+	"github.com/K7mQ2vR9/base-pkg/language"
+	"github.com/K7mQ2vR9/base-pkg/result/xcode"
 
 	"github.com/zeromicro/go-zero/core/logc"
 	"github.com/zeromicro/go-zero/core/trace"

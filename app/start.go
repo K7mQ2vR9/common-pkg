@@ -1,7 +1,7 @@
 package app
 
 import (
-	"github.com/doubunv/common-pkg/appMiddleware"
+	"github.com/K7mQ2vR9/base-pkg/appMiddleware"
 	"github.com/zeromicro/go-zero/rest"
 )
 
@@ -37,11 +37,23 @@ func WithCheckTokenHandleSMOption(fun appMiddleware.CheckRequestTokenFunc) SMOpt
 	}
 }
 
+// WithTrustedProxyCIDRs 设置 HTTP 中间件信任的代理网段。
+func WithTrustedProxyCIDRs(cidrs []string) (SMOption, error) {
+	option, err := appMiddleware.WithTrustedProxyCIDRs(cidrs)
+	if err != nil {
+		return nil, err
+	}
+	return func(s *ServerMiddleware) {
+		s.trustedProxyOption = option
+	}, nil
+}
+
 type ServerMiddleware struct {
-	whiteHeader      map[string]int
-	checkTokenHandle appMiddleware.CheckRequestTokenFunc
-	maxConcurrency   int
-	Server           *rest.Server
+	whiteHeader        map[string]int
+	checkTokenHandle   appMiddleware.CheckRequestTokenFunc
+	trustedProxyOption appMiddleware.ApiHeadOption
+	maxConcurrency     int
+	Server             *rest.Server
 
 	isDebug bool
 	isTest  bool
@@ -73,6 +85,9 @@ func (s *ServerMiddleware) ApiUseMiddleware() {
 func (s *ServerMiddleware) useApiHeaderMiddleware() {
 	var apiHeaderOption = []appMiddleware.ApiHeadOption{
 		appMiddleware.CloseVerifyOption(s.whiteHeader),
+	}
+	if s.trustedProxyOption != nil {
+		apiHeaderOption = append(apiHeaderOption, s.trustedProxyOption)
 	}
 	if s.isDebug {
 		apiHeaderOption = append(apiHeaderOption, appMiddleware.WithDebugOption())

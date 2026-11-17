@@ -3,11 +3,10 @@ package headInfo
 import (
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"strings"
 
-	"github.com/doubunv/common-pkg/consts"
+	"github.com/K7mQ2vR9/base-pkg/consts"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/metadata"
 
@@ -21,7 +20,7 @@ type Head struct {
 	Version          string `json:"version"`           // APP版本
 	Source           string `json:"source"`            // 来源渠道
 	ClientIp         string `json:"client_ip"`         // 客户端IP
-	AdminClientIp    string `json:"admin_client_ip"`   // 管理后台域名商IP
+	AdminClientIp    string `json:"admin_client_ip"`   // 后台请求的客户端 IP
 	Trace            string `json:"trace"`             // 链路路由
 	TokenUid         string `json:"token_uid"`         // 用户ID
 	ReqPath          string `json:"req_path"`          // 请求path
@@ -35,14 +34,21 @@ type Head struct {
 	DeviceId         string `json:"device_id"`
 }
 
+// GetHead 读取请求头，直接使用连接对端作为客户端 IP。
 func GetHead(r *http.Request) *Head {
+	return ClientIPResolver{}.GetHead(r)
+}
+
+// GetHead 读取请求头，并按已配置的可信代理解析客户端 IP。
+func (resolver ClientIPResolver) GetHead(r *http.Request) *Head {
 	header := r.Header
+	clientIP := resolver.clientIP(r)
 	return &Head{
 		AuthorizationJwt: strings.Trim(header.Get(consts.HeaderToken), " "),
 		Version:          strings.Trim(header.Get(consts.Version), " "),
 		Source:           strings.Trim(header.Get(consts.Source), " "),
-		ClientIp:         getClientIP(r),
-		AdminClientIp:    getAdminClientIPS(r),
+		ClientIp:         clientIP,
+		AdminClientIp:    clientIP,
 		Trace:            getTraceId(r),
 		ReqPath:          r.URL.Path,
 		Business:         strings.Trim(header.Get(consts.Business), " "),
@@ -103,83 +109,6 @@ func getTraceId(r *http.Request) string {
 		traceId = trace.SpanContextFromContext(r.Context()).TraceID().String()
 	}
 	return traceId
-}
-
-// /////////////////////////////////////
-var adminClientIPHeaders = []string{
-	"CF-Connecting-IP", //CLOUDFLARE
-}
-
-func getAdminClientIP(r *http.Request) string {
-	for _, header := range adminClientIPHeaders {
-		if ip := getIPFromHeader(r, header); ip != "" {
-			return ip
-		}
-	}
-	return normalizeIP(r.RemoteAddr)
-}
-
-func getAdminClientIPS(r *http.Request) string {
-	return r.Header.Get("X-Forwarded-For")
-}
-
-///////////////////////////////////////
-
-var clientIPHeaders = []string{
-	"CF-Connecting-IP", //CLOUDFLARE
-	"TZ-Connecting-IP", //自定义
-	"X-Real-IP",
-	"X-Forwarded-For",
-}
-
-func getClientIP(r *http.Request) string {
-	for _, header := range clientIPHeaders {
-		if ip := getIPFromHeader(r, header); ip != "" {
-			return ip
-		}
-	}
-	return normalizeIP(r.RemoteAddr)
-}
-
-func getIPFromHeader(r *http.Request, header string) string {
-	for _, value := range r.Header.Values(header) {
-		// X-Forwarded-For 可能是：
-		// client, proxy1, proxy2
-		first, _, _ := strings.Cut(value, ",")
-
-		if ip := normalizeIP(first); ip != "" {
-			return ip
-		}
-	}
-
-	return ""
-}
-
-func normalizeIP(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-
-	// 处理 IPv4:port 和 [IPv6]:port。
-	if host, _, err := net.SplitHostPort(value); err == nil {
-		value = host
-	}
-
-	// 兼容没有端口但包含方括号的 IPv6。
-	value = strings.Trim(value, "[]")
-
-	ip := net.ParseIP(value)
-	if ip == nil {
-		return ""
-	}
-
-	// 返回标准格式，同时处理 IPv4-mapped IPv6。
-	if ipv4 := ip.To4(); ipv4 != nil {
-		return ipv4.String()
-	}
-
-	return ip.String()
 }
 
 // GetFullHead 返回原始请求头，结果可能包含认证凭证。

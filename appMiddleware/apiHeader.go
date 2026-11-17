@@ -3,13 +3,14 @@ package appMiddleware
 import (
 	"bytes"
 	"errors"
-	"github.com/doubunv/common-pkg/headInfo"
-	"github.com/doubunv/common-pkg/result"
-	"github.com/zeromicro/go-zero/core/logc"
 	"io"
 	"net/http"
 	"runtime/debug"
 	"strings"
+
+	"github.com/K7mQ2vR9/base-pkg/headInfo"
+	"github.com/K7mQ2vR9/base-pkg/result"
+	"github.com/zeromicro/go-zero/core/logc"
 )
 
 type ApiHeadOption func(m *ApiHeaderMiddleware)
@@ -26,10 +27,22 @@ func WithDebugOption() ApiHeadOption {
 	}
 }
 
+// WithTrustedProxyCIDRs 在装配中间件前校验可信代理配置。
+func WithTrustedProxyCIDRs(cidrs []string) (ApiHeadOption, error) {
+	resolver, err := headInfo.NewClientIPResolver(cidrs)
+	if err != nil {
+		return nil, err
+	}
+	return func(m *ApiHeaderMiddleware) {
+		m.clientIPResolver = resolver
+	}, nil
+}
+
 type ApiHeaderMiddleware struct {
-	NotVerify    bool
-	debug        bool
-	noVerifyPath map[string]int
+	NotVerify        bool
+	debug            bool
+	noVerifyPath     map[string]int
+	clientIPResolver headInfo.ClientIPResolver
 }
 
 func NewApiHeaderMiddleware(arg ...ApiHeadOption) *ApiHeaderMiddleware {
@@ -59,7 +72,7 @@ func (m *ApiHeaderMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}()
 
-		h := headInfo.GetHead(r)
+		h := m.clientIPResolver.GetHead(r)
 		if r.Method != http.MethodGet && !m.NotVerify && m.verifyPath(r.URL.Path) {
 			if err := h.Verify(); err != nil {
 				result.HttpErrorResult(r.Context(), w, err)

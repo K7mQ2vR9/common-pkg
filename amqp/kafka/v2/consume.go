@@ -3,7 +3,7 @@ package v2
 import (
 	"context"
 	"errors"
-	"github.com/doubunv/common-pkg/amqp/kafka/config"
+	"github.com/K7mQ2vR9/base-pkg/amqp/kafka/config"
 	"github.com/segmentio/kafka-go"
 	"github.com/zeromicro/go-zero/core/logc"
 	"sync"

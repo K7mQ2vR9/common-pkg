@@ -5,10 +5,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/doubunv/common-pkg/consts"
-	"github.com/doubunv/common-pkg/ctxMd"
-	"github.com/doubunv/common-pkg/headInfo"
-	"github.com/doubunv/common-pkg/result/xcode"
+	"github.com/K7mQ2vR9/base-pkg/consts"
+	"github.com/K7mQ2vR9/base-pkg/ctxMd"
+	"github.com/K7mQ2vR9/base-pkg/headInfo"
+	"github.com/K7mQ2vR9/base-pkg/result/xcode"
 	"google.golang.org/grpc/metadata"
 )
 

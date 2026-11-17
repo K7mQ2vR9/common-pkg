@@ -2,7 +2,7 @@ package rpc
 
 import (
 	"fmt"
-	"github.com/doubunv/common-pkg/rpc/interceptors"
+	"github.com/K7mQ2vR9/base-pkg/rpc/interceptors"
 
 	"github.com/zeromicro/go-zero/zrpc"
 )
