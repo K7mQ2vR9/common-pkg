@@ -6,14 +6,16 @@ import (
 	"github.com/doubunv/common-pkg/xxlJob"
 	"github.com/xxl-job/xxl-job-executor-go"
 	"log"
+	"os"
 
 	"github.com/xxl-job/xxl-job-executor-go/example/task"
 )
 
 func main() {
+	address, accessToken := schedulerConnection()
 	client := xxlJob.NewClient(context.Background(), xxlJob.Config{
-		Address:      "http://127.0.0.1:5050/xxl-job-admin",
-		AccessToken:  "default_token",
+		Address:      address,
+		AccessToken:  accessToken,
 		ExecutorPort: "9999",
 		RegistryKey:  "golang-jobs",
 	}).Register(
@@ -22,6 +24,16 @@ func main() {
 	client.MustStart()
 
 	select {}
+}
+
+// schedulerConnection 从运行环境读取示例服务的连接地址和凭证。
+func schedulerConnection() (address, accessToken string) {
+	address = os.Getenv("XXL_JOB_ADDRESS")
+	accessToken = os.Getenv("XXL_JOB_ACCESS_TOKEN")
+	if address == "" || accessToken == "" {
+		log.Fatal("XXL_JOB_ADDRESS and XXL_JOB_ACCESS_TOKEN must be set")
+	}
+	return address, accessToken
 }
 
 type TestHandler struct {
@@ -39,9 +51,10 @@ func (h TestHandler) Pattern() string {
 }
 
 func Old() {
+	address, accessToken := schedulerConnection()
 	exec := xxl.NewExecutor(
-		xxl.ServerAddr("http://127.0.0.1:8080/xxl-job-admin"),
-		xxl.AccessToken("default_token"), // 请求令牌(默认为空)
+		xxl.ServerAddr(address),
+		xxl.AccessToken(accessToken),
 		// xxl.ExecutorIp("127.0.0.1"),      // 可自动获取
 		xxl.ExecutorPort("9999"),       // 默认9999（非必填）
 		xxl.RegistryKey("golang-jobs"), // 执行器名称

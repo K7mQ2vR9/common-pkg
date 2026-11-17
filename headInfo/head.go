@@ -62,13 +62,19 @@ func (h *Head) Verify() error {
 }
 
 func (h *Head) String() string {
-	data, _ := json.Marshal(h)
+	if h == nil {
+		return "null"
+	}
+
+	// 字符串表示用于日志，清空副本中的凭证以保留原始认证数据。
+	logHead := *h
+	logHead.AuthorizationJwt = ""
+	data, _ := json.Marshal(logHead)
 	return string(data)
 }
 
 func ContextHeadInLog(ctx context.Context, h *Head) context.Context {
 	ctxNew := logx.ContextWithFields(ctx,
-		logx.Field(consts.HeaderToken, h.AuthorizationJwt),
 		logx.Field(consts.Version, h.Version),
 		logx.Field(consts.Source, h.Source),
 		logx.Field(consts.ClientIp, h.ClientIp),
@@ -176,6 +182,7 @@ func normalizeIP(value string) string {
 	return ip.String()
 }
 
+// GetFullHead 返回原始请求头，结果可能包含认证凭证。
 func GetFullHead(r *http.Request) map[string][]string {
 	headers := make(map[string][]string)
 

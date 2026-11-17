@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/doubunv/common-pkg/es/esaws/core"
 	"github.com/doubunv/common-pkg/es/esaws/model"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -43,11 +44,17 @@ func indexS(model *model.EsModel) {
 }
 
 func TestLogInfo(t *testing.T) {
+	address := os.Getenv("COMMON_PKG_OPENSEARCH_TEST_URL")
+	username := os.Getenv("COMMON_PKG_OPENSEARCH_TEST_USERNAME")
+	password := os.Getenv("COMMON_PKG_OPENSEARCH_TEST_PASSWORD")
+	if address == "" || username == "" || password == "" {
+		t.Skip("configure COMMON_PKG_OPENSEARCH_TEST_URL, COMMON_PKG_OPENSEARCH_TEST_USERNAME and COMMON_PKG_OPENSEARCH_TEST_PASSWORD to run this integration test")
+	}
 
 	esClient := core.MustNewEs(&core.Config{
-		Addresses:  []string{"https://search-es-usdt-db-dev-fp3bbysw7vfmnn6u7segtwqxpa.aos.ap-southeast-1.on.aws"},
-		Username:   "admin",
-		Password:   "Dev123456.",
+		Addresses:  []string{address},
+		Username:   username,
+		Password:   password,
 		MaxRetries: 3,
 	})
 	ctx := context.Background()

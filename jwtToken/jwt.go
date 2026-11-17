@@ -18,20 +18,19 @@
 package jwtToken
 
 import (
+	"strings"
 	"time"
 
-	"github.com/pkg/errors"
-
 	"github.com/dgrijalva/jwt-go"
+	"github.com/pkg/errors"
 )
 
 const (
 	AccessTokenExpireDuration = 7 * 24 * time.Hour
 	AdminToken                = 1
 	UserToken                 = 2
+	hs256MinKeyBytes          = 32
 )
-
-//var jwtSecret = []byte("kdd452-934sg4-l4d4q6")
 
 type Claims struct {
 	Uid          int64  `json:"uid"`
@@ -44,6 +43,11 @@ type Claims struct {
 }
 
 func GenerateToken(jwtSecret string, uid int64, source string, sign string, businessCode string, roleId int64, tokenType int) (accessToken string, err error) {
+	key, err := jwtSigningKey(jwtSecret)
+	if err != nil {
+		return "", err
+	}
+
 	nowTime := time.Now()
 	expireTime := nowTime.Add(AccessTokenExpireDuration)
 	claims := Claims{
@@ -59,7 +63,7 @@ func GenerateToken(jwtSecret string, uid int64, source string, sign string, busi
 		},
 	}
 
-	accessToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(jwtSecret)
+	accessToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(key)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to get accessToken")
 	}
@@ -68,25 +72,44 @@ func GenerateToken(jwtSecret string, uid int64, source string, sign string, busi
 }
 
 func ParseToken(jwtSecret string, token string) (*Claims, error) {
-	tokenClaims, err := jwt.ParseWithClaims(token, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		return jwtSecret, nil
-	})
-	if tokenClaims != nil {
-		if claims, ok := tokenClaims.Claims.(*Claims); ok && tokenClaims.Valid {
-			return claims, nil
-		}
+	key, err := jwtSigningKey(jwtSecret)
+	if err != nil {
+		return nil, err
 	}
-	return nil, errors.Wrap(err, "failed to parse token")
+
+	claims := &Claims{}
+	parser := jwt.Parser{ValidMethods: []string{jwt.SigningMethodHS256.Alg()}}
+	parsedToken, err := parser.ParseWithClaims(token, claims, func(_ *jwt.Token) (interface{}, error) {
+		return key, nil
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse token")
+	}
+	if parsedToken == nil || !parsedToken.Valid {
+		return nil, errors.New("invalid token")
+	}
+	return claims, nil
 }
 
-func ParseRefreshToken(jwtSecret string, aToken string) (claims *Claims, err error) {
-	accessClaim, err := ParseToken(jwtSecret, aToken)
+// ParseRefreshToken 校验用于刷新的访问令牌，只允许有效期内的管理员或用户令牌。
+func ParseRefreshToken(jwtSecret string, accessToken string) (*Claims, error) {
+	claims, err := ParseToken(jwtSecret, accessToken)
 	if err != nil {
-		return claims, errors.WithMessage(err, "failed to parse accessToken")
+		return nil, errors.WithMessage(err, "failed to parse access token for refresh")
 	}
+	if claims.TokenType != AdminToken && claims.TokenType != UserToken {
+		return nil, errors.New("unsupported token type for refresh")
+	}
+	if claims.ExpiresAt <= time.Now().Unix() {
+		return nil, errors.New("token has expired or has no expiration")
+	}
+	return claims, nil
+}
 
-	if accessClaim.ExpiresAt > time.Now().Unix() {
-		return accessClaim, nil
+// jwtSigningKey 校验 HS256 密钥配置，保留调用方配置的原始字节。
+func jwtSigningKey(secret string) ([]byte, error) {
+	if len(secret) < hs256MinKeyBytes || strings.TrimSpace(secret) == "" {
+		return nil, errors.New("JWT signing key must be at least 32 bytes and not blank")
 	}
-	return accessClaim, errors.WithMessage(errors.New("Token time out"), "failed to parse refreshToken")
+	return []byte(secret), nil
 }

@@ -3,15 +3,16 @@ package appMiddleware
 import (
 	"context"
 	"errors"
-	"github.com/doubunv/common-pkg/headInfo"
-	"github.com/doubunv/common-pkg/result/xcode"
-	"github.com/zeromicro/go-zero/core/logx"
-	"google.golang.org/grpc/metadata"
 	"net/http"
 	"runtime/debug"
 
+	"github.com/doubunv/common-pkg/consts"
+	"github.com/doubunv/common-pkg/headInfo"
+	"github.com/doubunv/common-pkg/result/xcode"
 	"github.com/zeromicro/go-zero/core/logc"
+	"github.com/zeromicro/go-zero/core/logx"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 type RpcAuthMiddleware struct {
@@ -24,19 +25,22 @@ func NewRpcAuthMiddleware() *RpcAuthMiddleware {
 	return &RpcAuthMiddleware{}
 }
 
-func (m *RpcAuthMiddleware) contextMetadataInLog(ctx context.Context) context.Context {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return ctx
+// contextMetadataInLog 只写入已明确用于排查请求的字段，原始 metadata 继续供认证使用。
+func contextMetadataInLog(ctx context.Context, md metadata.MD) context.Context {
+	logKeys := []string{
+		consts.Trace, consts.RequestId, "x-request-id", "traceparent", "rpc_name",
+		consts.ReqPath, consts.BusinessCode, consts.Business, consts.Source, consts.Version,
+		consts.ClientIp, consts.AdminClientIp, consts.TokenUid, consts.TokenUidRole,
+		consts.ContentLanguage, consts.Timezone, consts.UserAgent, consts.DeviceId, consts.OriginUrl,
+	}
+	fields := make([]logx.LogField, 0, len(logKeys))
+	for _, key := range logKeys {
+		if values := md.Get(key); len(values) > 0 {
+			fields = append(fields, logx.Field(key, values))
+		}
 	}
 
-	var fieldList = make([]logx.LogField, 0)
-	for k, v := range md {
-		fieldList = append(fieldList, logx.Field(k, v))
-	}
-	ctxNew := logx.ContextWithFields(ctx, fieldList...)
-
-	return ctxNew
+	return logx.ContextWithFields(ctx, fields...)
 }
 
 func (m *RpcAuthMiddleware) Handle(getPathWhite PathWhiteHandle) grpc.UnaryServerInterceptor {
@@ -52,7 +56,7 @@ func (m *RpcAuthMiddleware) Handle(getPathWhite PathWhiteHandle) grpc.UnaryServe
 		mdData, ok := metadata.FromIncomingContext(ctx)
 		if ok {
 			ctx = metadata.NewOutgoingContext(ctx, mdData)
-			ctx = m.contextMetadataInLog(ctx)
+			ctx = contextMetadataInLog(ctx, mdData)
 			if headInfo.GetBusinessCode(ctx) == "" {
 				if getPathWhite == nil {
 					return nil, errors.New("Rpc header data err")
