@@ -1,23 +1,24 @@
 package appMiddleware
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/K7mQ2vR9/base-pkg/consts"
-	"github.com/K7mQ2vR9/base-pkg/ctxMd"
 	"github.com/K7mQ2vR9/base-pkg/headInfo"
 	"github.com/K7mQ2vR9/base-pkg/result/xcode"
-	"google.golang.org/grpc/metadata"
 )
 
 type (
 	CheckRequestTokenFuncWithErr func(r *http.Request, token string) (int64, error)
 	CheckRequestTokenFunc        func(r *http.Request, token string) int64
+	// CheckRequestTokenFuncWithUserInfo 返回已验证的用户 ID 和可选的用户信息 JSON。
+	CheckRequestTokenFuncWithUserInfo func(r *http.Request, token string) (uid int64, userInfo json.RawMessage, err error)
 )
 
-func verifyPath(urlPath string, noVerifyPath map[string]int) bool {
+func isWhitelistedPath(urlPath string, noVerifyPath map[string]int) bool {
 	if _, ok := noVerifyPath[urlPath]; ok {
 		return true
 	}
@@ -34,69 +35,63 @@ func verifyPath(urlPath string, noVerifyPath map[string]int) bool {
 }
 
 func MustAuthTokenRequest(r *http.Request, checkToken CheckRequestTokenFunc, noVerifyPath map[string]int) (*http.Request, error) {
-	ctx := r.Context()
-
-	token := strings.Trim(r.Header.Get(consts.HeaderToken), "")
-	wPathBool := verifyPath(r.URL.Path, noVerifyPath)
-	if !wPathBool && token == "" {
-		return r, xcode.UserNotFound
-	}
-
-	if token != "" {
-		var tokenUid int64 = 0
-		if checkToken != nil {
-			tokenUid = checkToken(r, token)
-		}
-		if tokenUid > 0 {
-			md := ctxMd.SetMdCtxFromOut(ctx, consts.TokenUid, strconv.FormatInt(tokenUid, 10))
-			ctx = metadata.NewOutgoingContext(ctx, md)
-		} else {
-			if !wPathBool {
-				if tokenUid == -1 {
-					return r, xcode.TokenPermissionDeniedWithMsg(headInfo.GetPath(ctx))
-				}
-				return r, xcode.TokenInvalid
-			}
+	var check CheckRequestTokenFuncWithErr
+	if checkToken != nil {
+		check = func(r *http.Request, token string) (int64, error) {
+			return checkToken(r, token), nil
 		}
 	}
-
-	newReq := r.WithContext(ctx)
-
-	return newReq, nil
+	return MustAuthTokenRequestWithErr(r, check, noVerifyPath)
 }
 
+// MustAuthTokenRequestWithErr 统一处理必需认证和白名单上的可选认证。
 func MustAuthTokenRequestWithErr(r *http.Request, checkToken CheckRequestTokenFuncWithErr, noVerifyPath map[string]int) (*http.Request, error) {
-	ctx := r.Context()
+	return mustAuthTokenRequestWithUserInfo(r, adaptTokenCheck(checkToken), noVerifyPath)
+}
 
-	token := strings.Trim(r.Header.Get(consts.HeaderToken), "")
-	wPathBool := verifyPath(r.URL.Path, noVerifyPath)
-	if !wPathBool && token == "" {
-		return r, xcode.TokenNotLoginWithMsg("User not login.")
+func adaptTokenCheck(checkToken CheckRequestTokenFuncWithErr) CheckRequestTokenFuncWithUserInfo {
+	if checkToken == nil {
+		return nil
+	}
+	return func(r *http.Request, token string) (int64, json.RawMessage, error) {
+		uid, err := checkToken(r, token)
+		return uid, nil, err
+	}
+}
+
+func mustAuthTokenRequestWithUserInfo(r *http.Request, checkToken CheckRequestTokenFuncWithUserInfo, noVerifyPath map[string]int) (*http.Request, error) {
+	uid, userInfo, err := authenticateToken(r, checkToken)
+	if err == nil {
+		ctx := headInfo.SetTokenUid(r.Context(), strconv.FormatInt(uid, 10))
+		return r.WithContext(headInfo.SetUserInfo(ctx, userInfo)), nil
+	}
+	if isWhitelistedPath(r.URL.Path, noVerifyPath) {
+		// 白名单允许匿名访问，但认证失败时不得沿用上下文中的用户身份。
+		ctx := headInfo.SetTokenUid(r.Context(), "")
+		return r.WithContext(headInfo.SetUserInfo(ctx, nil)), nil
+	}
+	return r, err
+}
+
+func authenticateToken(r *http.Request, checkToken CheckRequestTokenFuncWithUserInfo) (int64, json.RawMessage, error) {
+	token := strings.TrimSpace(r.Header.Get(consts.HeaderToken))
+	if token == "" {
+		return 0, nil, xcode.UserNotFound
+	}
+	if checkToken == nil {
+		return 0, nil, xcode.StatusServiceUnavailable
 	}
 
-	if token != "" {
-		var tokenUid int64 = 0
-		var err error
-		if checkToken != nil {
-			tokenUid, err = checkToken(r, token)
-			if err != nil {
-				return r, xcode.TokenSpecial(err)
-			}
-		}
-		if tokenUid > 0 {
-			md := ctxMd.SetMdCtxFromOut(ctx, consts.TokenUid, strconv.FormatInt(tokenUid, 10))
-			ctx = metadata.NewOutgoingContext(ctx, md)
-		} else {
-			if !wPathBool {
-				if tokenUid == -1 {
-					return r, xcode.TokenPermissionDeniedWithMsg(headInfo.GetPath(ctx))
-				}
-				return r, xcode.TokenInvalid
-			}
-		}
+	uid, userInfo, err := checkToken(r, token)
+	switch {
+	case err != nil:
+		return 0, nil, xcode.TokenSpecial(err)
+	case uid == -1:
+		return 0, nil, xcode.TokenPermissionDenied
+	case uid <= 0:
+		return 0, nil, xcode.TokenInvalid
+	case len(userInfo) != 0 && !json.Valid(userInfo):
+		return 0, nil, xcode.StatusServiceUnavailable
 	}
-
-	newReq := r.WithContext(ctx)
-
-	return newReq, nil
+	return uid, userInfo, nil
 }

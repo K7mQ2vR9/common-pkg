@@ -34,6 +34,24 @@ func WithAesKeyOption(aesKey string) SMOption {
 func WithCheckTokenHandleSMOption(fun appMiddleware.CheckRequestTokenFunc) SMOption {
 	return func(s *ServerMiddleware) {
 		s.checkTokenHandle = fun
+		s.authOption = nil
+	}
+}
+
+// WithCheckTokenHandleWithErrSMOption 启用可返回错误的认证回调。
+func WithCheckTokenHandleWithErrSMOption(fun appMiddleware.CheckRequestTokenFuncWithErr) SMOption {
+	return withAuthOption(appMiddleware.WithCheckOptionWithErr(fun))
+}
+
+// WithCheckTokenHandleWithUserInfoSMOption 启用可返回登录用户 JSON 信息的认证回调。
+func WithCheckTokenHandleWithUserInfoSMOption(fun appMiddleware.CheckRequestTokenFuncWithUserInfo) SMOption {
+	return withAuthOption(appMiddleware.WithCheckOptionWithUserInfo(fun))
+}
+
+func withAuthOption(option appMiddleware.AuthMiddlewareOption) SMOption {
+	return func(s *ServerMiddleware) {
+		s.authOption = option
+		s.checkTokenHandle = nil
 	}
 }
 
@@ -51,6 +69,7 @@ func WithTrustedProxyCIDRs(cidrs []string) (SMOption, error) {
 type ServerMiddleware struct {
 	whiteHeader        map[string]int
 	checkTokenHandle   appMiddleware.CheckRequestTokenFunc
+	authOption         appMiddleware.AuthMiddlewareOption
 	trustedProxyOption appMiddleware.ApiHeadOption
 	maxConcurrency     int
 	Server             *rest.Server
@@ -73,13 +92,14 @@ func NewServerMiddleware(s *rest.Server, opt ...SMOption) *ServerMiddleware {
 }
 
 func (s *ServerMiddleware) ApiUseMiddleware() {
+	authMiddleware := s.authMiddleware()
 	s.Server.Use(appMiddleware.NewCorsMiddleware().Handle)
 	if s.maxConcurrency > 0 {
 		s.Server.Use(appMiddleware.NewConcurrencyLimiter(s.maxConcurrency).Handle)
 	}
 	s.useApiRequestDecrypt()
 	s.useApiHeaderMiddleware()
-	s.mustUserAgentMiddleware()
+	s.Server.Use(authMiddleware)
 }
 
 func (s *ServerMiddleware) useApiHeaderMiddleware() {
@@ -97,15 +117,18 @@ func (s *ServerMiddleware) useApiHeaderMiddleware() {
 	).Handle)
 }
 
-func (s *ServerMiddleware) mustUserAgentMiddleware() {
+func (s *ServerMiddleware) authMiddleware() rest.Middleware {
+	if s.authOption != nil {
+		return appMiddleware.NewUserAuthMiddlewareWithErr(s.whiteHeader, s.authOption).Handle
+	}
 	if s.checkTokenHandle == nil {
-		panic("must use CheckTokenHandleSMOption.")
+		panic("token checker is required: use an app token checker option")
 	}
 
-	s.Server.Use(appMiddleware.NewUserAgentMiddleware(
+	return appMiddleware.NewUserAgentMiddleware(
 		s.whiteHeader,
 		appMiddleware.WithCheckOption(s.checkTokenHandle),
-	).Handle)
+	).Handle
 }
 
 func (s *ServerMiddleware) useApiRequestDecrypt() {

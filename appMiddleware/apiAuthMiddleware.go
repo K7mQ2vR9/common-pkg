@@ -25,6 +25,9 @@ func NewUserAgentMiddleware(noVerifyPath map[string]int, ops ...MiddlewareOption
 	for _, op := range ops {
 		op(res)
 	}
+	if res.check == nil {
+		panic("token checker is required: use WithCheckOption")
+	}
 	return res
 }
 

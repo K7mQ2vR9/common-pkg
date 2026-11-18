@@ -28,6 +28,9 @@ func NewCheckServiceStatusMiddleware(noVerifyPath map[string]int, ops ...CheckSe
 	for _, op := range ops {
 		op(res)
 	}
+	if res.check == nil {
+		panic("service status checker is required: use WithCheckServiceStatusCheckOption")
+	}
 	return res
 }
 
@@ -43,18 +46,11 @@ func (m *CheckServiceStatusMiddleware) Handle(next http.HandlerFunc) http.Handle
 }
 
 func CheckServiceStatusRequest(r *http.Request, checkServiceStatus CheckServiceStatusFunc, noVerifyPath map[string]int) (*http.Request, error) {
-	ctx := r.Context()
-	token := headInfo.GetJwtToken(ctx)
-
-	wPathBool := verifyPath(r.URL.Path, noVerifyPath)
-	if !wPathBool {
-		blServiceStatus := checkServiceStatus(r, token)
-		if !blServiceStatus {
-			return r, xcode.StatusServiceUnavailable
-		}
+	if isWhitelistedPath(r.URL.Path, noVerifyPath) {
+		return r, nil
 	}
-
-	newReq := r.WithContext(ctx)
-
-	return newReq, nil
+	if checkServiceStatus == nil || !checkServiceStatus(r, headInfo.GetJwtToken(r.Context())) {
+		return r, xcode.StatusServiceUnavailable
+	}
+	return r, nil
 }

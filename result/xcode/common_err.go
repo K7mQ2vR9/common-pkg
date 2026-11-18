@@ -9,6 +9,7 @@ import (
 var (
 	UserNotFound             = New(http.StatusUnauthorized, "User not login. ")
 	TokenInvalid             = New(http.StatusPaymentRequired, "Token invalid. ")
+	TokenPermissionDenied    = New(http.StatusMethodNotAllowed, "No permission")
 	StatusServiceUnavailable = New(http.StatusServiceUnavailable, "Status service unavailable")
 )
 
@@ -25,13 +26,10 @@ func TokenInvalidWithMsg(msg string) error {
 }
 
 func TokenSpecial(err error) error {
-	ok, codeErr := IsSpecialCodeError(err)
-
-	if ok {
-		return New(codeErr.Code(), err.Error())
+	if ok, codeErr := IsSpecialCodeError(err); ok && codeErr != nil {
+		return New(codeErr.Code(), "Authentication failed.")
 	}
-
-	return TokenInvalidWithMsg(err.Error())
+	return TokenInvalid
 }
 
 func NewNotifyError(err error) error {

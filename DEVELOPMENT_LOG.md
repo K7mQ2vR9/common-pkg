@@ -17,7 +17,7 @@
 ## 当前基线
 
 - 建档基线为 `pre` 分支上的 `2b03a40`。
-- Go 模块声明为 `github.com/K7mQ2vR9/base-pkg`。本地开发目录仍为 `common-pkg/`，远端仓库和发布版本待第 7 项处理。
+- Go 模块声明为 `github.com/K7mQ2vR9/base-pkg`，首版 `v0.0.0` 已发布到同名 GitHub 私有仓库。本地 `common-pkg/` 仍是旧仓库的工作区。
 
 ## 待办与进度
 
@@ -28,9 +28,9 @@
 | 3 | 请求与 RPC 日志中的凭证脱敏 | 已修改、验证并确认 |
 | 4 | 客户端 IP 的可信代理校验 | 已修改、验证并确认 |
 | 5 | Kafka v2 死信处理和位点提交 | 已修改、验证并确认 |
-| 6 | Kafka v2 消费和关闭流程 | 已修改并验证，待确认 |
-| 7 | Go 模块路径与独立发版 | 模块路径已按用户要求修改并验证，远端及发版待处理 |
-| 8 | 认证中间件的回调、白名单和错误处理 | 待处理 |
+| 6 | Kafka v2 消费和关闭流程 | 已修改、验证并确认 |
+| 7 | Go 模块路径与独立发版 | `v0.0.0` 已发布并验证下载，用户要求跳过后续处理 |
+| 8 | 认证中间件的回调、白名单和错误处理 | 已修改并验证，包含登录用户信息扩展，待确认 |
 | 9 | 统一响应和特殊错误匹配 | 待处理 |
 | 10 | 多语言转换和 JSON 序列化兼容 | 待处理 |
 | 11 | 请求头校验、CORS 和并发上限 | 待处理 |
@@ -108,3 +108,29 @@
 - **限制** 使用模拟 Reader 和回调，未连接真实 Kafka broker。多个分区共享拉取与分发循环，故障分区缓冲填满时仍会产生跨分区背压。与 Kafka broker 的重平衡和关闭期间的重投待联调。
 - **测试清理** 登记结果后已删除临时测试用例、overlay 配置和构建缓存，并核对工作区无本次新增的测试文件。
 - **下一步** 等用户确认第 6 项后处理第 7 项剩余的远端和独立发版工作。
+
+### 2026-11-17 / DEV-20261117-009 / 第 7 项发布 base-pkg v0.0.0
+
+- **进度** 用户要求进入下一项，第 6 项记为已确认。第 7 项已发布并验证，等待确认。
+- **发布** 新建 [K7mQ2vR9/base-pkg](https://github.com/K7mQ2vR9/base-pkg) 私有仓库。由本地源码提交 `f753d52` 生成快照，排除 `.DS_Store`，以独立的首个提交 `4726dbab6bcfcc481d769322fd5252033a005805` 创建远端 `main` 和 `v0.0.0`。旧提交历史和旧 tag 留在原仓库。
+- **验证** 发布前检查快照中的原 JWT、OpenSearch、XXL-JOB 和 SSH 凭证特征，通过。快照的 `go build -mod=readonly -buildvcs=false ./...`、`go test -mod=readonly -buildvcs=false ./... -run '^$' -count=1` 和 Git 差异检查通过。测试命令只编译测试包。远端 `git ls-remote` 确认 `main` 和 `v0.0.0` 指向发布提交。首次下载触发环境中已有的公开校验库配置，校验失败。以只针对本模块的 `GOPRIVATE`、`GONOPROXY` 和 `GONOSUMDB` 例外及 SSH 权限重跑，`go mod download -json github.com/K7mQ2vR9/base-pkg@v0.0.0` 从空缓存下载成功，`go list -m -f '{{.Version}}' github.com/K7mQ2vR9/base-pkg@latest` 返回 `v0.0.0`。
+- **用户决定** 收到跳过第 7 项的指令时，远端仓库、`main` 和 `v0.0.0` 已经创建，且已验证下载。按最新要求停止第 7 项的后续操作，保留已发布的版本。
+- **测试清理** 登记验证后清理了测试缓存、临时发布快照和验收下载目录。Go 下载缓存中的只读文件通过 `GOMODCACHE=<临时目录> go clean -modcache` 清理。核对临时目录不存在，工作区无本次新增测试文件。
+- **当前状态** 本地旧工作区的 `origin` 仍指向 `K7mQ2vR9/common-pkg`。第 8 项认证中间件调整待开始。
+
+### 2026-11-17 / DEV-20261117-010 / 第 8 项认证中间件统一
+
+- **进度** 用户要求开始第 8 项。代码已修改并通过定向验证，等待确认。
+- **改动** 旧版和带错误回调的认证共用同一个流程。白名单支持原有的精确匹配和尾部 `*` 前缀匹配。未提供 Token 或认证失败时以匿名身份继续，并清除上下文中原有的用户 ID。认证成功时写入已验证的用户 ID。受保护接口会拒绝认证失败，响应使用固定提示，特殊错误沿用原业务码，权限拒绝不包含内部路径。
+- **接入** `app.WithCheckTokenHandleWithErrSMOption` 启用带错误的回调，旧的 `WithCheckTokenHandleSMOption` 继续可用。两种选项都传入时以后配置的为准。`app` 装配和各认证、服务状态中间件在初始化时检查必需回调。服务状态检查沿用白名单，独立调用时缺少回调返回服务不可用。
+- **验证** 使用临时 Go overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -v ./app -run '^Test(AuthWhiteListAndAppOptions|AuthErrorsUseSafeMessages|MissingChecksFailDuringAssembly|ServiceStatusGuard)$' -count=1`，四组通过。覆盖新旧装配、匿名与已认证请求、白名单匹配、旧身份清除、特殊码、错误文本隔离、启动时缺少回调及状态检查。测试启动时提示缺少 `etc/language`，验证在本地内存请求中完成。`go build -mod=readonly -buildvcs=false ./...` 和 `git diff --check` 通过。
+- **测试清理** 登记验证结果后已删除临时测试用例、overlay 配置和构建缓存，并核对工作区无本次新增测试文件。
+- **下一步** 等用户确认后开始第 9 项统一响应和特殊错误匹配。
+
+### 2026-11-18 / DEV-20261118-001 / 第 8 项补充登录用户信息 JSON
+
+- **用户要求** 认证中间件注入当前登录用户的扩展 JSON，供业务使用。
+- **改动** 新增 `app.WithCheckTokenHandleWithUserInfoSMOption` 和 `appMiddleware.WithCheckOptionWithUserInfo`，回调可返回用户 ID、可选的 `json.RawMessage` 和错误。只有认证成功且扩展 JSON 格式有效时才注入。业务通过 `headInfo.GetUserInfo(ctx)` 获取独立副本，范围为当前 HTTP 请求上下文，避免自动进入 RPC metadata、请求头及日志字段。匿名访问和使用旧回调时清空旧扩展，现有认证回调签名继续可用。
+- **验证** 使用临时 Go overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -v ./app -run '^Test(AuthenticatedUserInfoFromCallback|InvalidAuthUserInfoIsRejected|ExistingAuthCallbacksStillWork)$' -count=1`，三组通过。覆盖认证后注入、忽略外部同名头和 metadata、扩展副本隔离、匿名清除、非法 JSON 拒绝以及旧回调兼容。测试启动时提示缺少 `etc/language`，验证在本地内存中完成。`go build -mod=readonly -buildvcs=false ./...` 和 `git diff --check` 通过。
+- **测试清理** 登记验证结果后已删除临时测试用例、overlay 配置和构建缓存，并核对工作区无本次新增测试文件。
+- **下一步** 等用户确认第 8 项后开始第 9 项统一响应和特殊错误匹配。

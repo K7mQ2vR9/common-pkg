@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"runtime/debug"
-	"strings"
 
 	"github.com/K7mQ2vR9/base-pkg/headInfo"
 	"github.com/K7mQ2vR9/base-pkg/result"
@@ -73,7 +72,7 @@ func (m *ApiHeaderMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 		}()
 
 		h := m.clientIPResolver.GetHead(r)
-		if r.Method != http.MethodGet && !m.NotVerify && m.verifyPath(r.URL.Path) {
+		if r.Method != http.MethodGet && !m.NotVerify && !isWhitelistedPath(r.URL.Path, m.noVerifyPath) {
 			if err := h.Verify(); err != nil {
 				result.HttpErrorResult(r.Context(), w, err)
 				return
@@ -99,19 +98,4 @@ func (m *ApiHeaderMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 
 		next(w, newReq)
 	}
-}
-
-func (m *ApiHeaderMiddleware) verifyPath(urlPath string) bool {
-	if _, ok := m.noVerifyPath[urlPath]; ok {
-		return false
-	}
-	for path, _ := range m.noVerifyPath {
-		if strings.HasPrefix(path, "/") && strings.HasSuffix(path, "*") {
-			prefix := strings.TrimSuffix(path, "*")
-			if strings.HasPrefix(urlPath, prefix) {
-				return false
-			}
-		}
-	}
-	return true
 }
