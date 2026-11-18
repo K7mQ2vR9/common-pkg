@@ -1,166 +1,122 @@
 package language
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
-	"fmt"
-	"github.com/zeromicro/go-zero/core/logc"
-	"os"
-	"path/filepath"
-	"reflect"
-	"runtime/debug"
 	"strings"
-	"sync"
+
+	translation "github.com/K7mQ2vR9/language-pkg"
 )
 
-var languageMap sync.Map
+var messageKeys = map[string]string{
+	"Authentication failed.":     "auth.failed",
+	"User not login.":            "auth.not_logged_in",
+	"No permission":              "auth.permission_denied",
+	"Token invalid.":             "auth.token_invalid",
+	"Internal Server Error":      "common.internal_error",
+	"Request failed.":            "common.request_failed",
+	"Service Unavailable":        "common.service_unavailable",
+	"Status service unavailable": "common.status_service_unavailable",
+	"Request decryption failed.": "request.decryption_failed",
+	"Request forbid.":            "request.forbidden",
+}
 
-func init() {
-	//languageMap = make(map[string]map[string]interface{})
-	dirPath := "etc/language"
-	files, err := os.ReadDir(dirPath)
+// TranslateMessage translates a response message or a dictionary key.
+func TranslateMessage(message, locale string) string {
+	key, ok := messageKeys[strings.TrimSpace(message)]
+	if !ok {
+		key = message
+	}
+	return translation.Translate(locale, key, message)
+}
+
+// SwitchLanguage translates matching string values when response data is encoded.
+// Plain strings and byte slices keep their types for the AES response path.
+func SwitchLanguage(data any, locale string) any {
+	if locale == "" {
+		return data
+	}
+	switch value := data.(type) {
+	case nil, []byte:
+		return data
+	case string:
+		return translation.Translate(locale, value, value)
+	default:
+		return localizedJSON{data: value, locale: locale}
+	}
+}
+
+type localizedJSON struct {
+	data   any
+	locale string
+}
+
+func (data localizedJSON) MarshalJSON() ([]byte, error) {
+	raw, err := json.Marshal(data.data)
 	if err != nil {
-		fmt.Println("读取文件夹时发生错误:", err)
-		return
+		return nil, err
 	}
-	for _, file := range files {
-		if !file.IsDir() {
-			readJson(dirPath + "/" + file.Name())
-		}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	rewrite := jsonTranslation{decoder: decoder, raw: raw, locale: data.locale}
+	if err := rewrite.value(false); err != nil {
+		return nil, err
 	}
+	if rewrite.output == nil {
+		return raw, nil
+	}
+	return append(rewrite.output, raw[rewrite.copied:]...), nil
 }
 
-func readJson(filePath string) {
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		fmt.Printf("文件 %s 不存在\n", filePath)
-		return
-	}
-	file, err := os.Open(filePath)
+type jsonTranslation struct {
+	decoder *json.Decoder
+	raw     []byte
+	locale  string
+	output  []byte
+	copied  int64
+}
+
+func (rewrite *jsonTranslation) value(protected bool) error {
+	previous := rewrite.decoder.InputOffset()
+	token, err := rewrite.decoder.Token()
 	if err != nil {
-		fmt.Println("打开文件时发生错误:", err)
-		return
+		return err
 	}
-	defer file.Close() // 确保文件最终会关闭
-	var data map[string]interface{}
-	if err := json.NewDecoder(file).Decode(&data); err != nil {
-		fmt.Println("解析 JSON 时发生错误:", err)
-		return
-	}
-
-	baseName := filepath.Base(file.Name())
-	fileNameWithoutExt := baseName[:len(baseName)-len(filepath.Ext(baseName))]
-	languageMap.Store(fileNameWithoutExt, data)
-}
-
-// TranslateMessage 查找单条响应文案，保留原有字符串类型。
-func TranslateMessage(message, language string) string {
-	if dictionary, ok := languageMap.Load(language); ok {
-		if translated, ok := dictionary.(map[string]interface{})[message].(string); ok {
-			return translated
-		}
-	}
-	return message
-}
-
-func SwitchLanguage(data interface{}, language string) interface{} {
-	defer func() {
-		if err := recover(); err != nil {
-			logc.Errorf(context.Background(), "SwitchLanguage error:%v, %s", err, string(debug.Stack()))
-			return
-		}
-	}()
-
-	if data == nil {
-		return data
-	}
-
-	if lg, ok := languageMap.Load(language); ok {
-		return recursiveGetAllValues(data, lg.(map[string]interface{}))
-	} else {
-		return data
-	}
-}
-
-func checkType(data interface{}) bool {
-	sw := reflect.ValueOf(data).Kind()
-	if sw == reflect.String {
-		return true
-	} else {
-		return false
-	}
-}
-
-func recursiveGetAllValues(data interface{}, newData map[string]interface{}) interface{} {
-
-	if newData == nil {
-		return data
-	}
-
-	v := reflect.ValueOf(data)
-	if v.Kind() == reflect.Ptr && !v.IsNil() {
-		v = v.Elem()
-	}
-
-	switch v.Kind() {
-	case reflect.Map:
-		result := make(map[string]interface{})
-		keys := v.MapKeys()
-		for _, key := range keys {
-			value := recursiveGetAllValues(v.MapIndex(key).Interface(), newData)
-			result[key.String()] = value
-			if checkType(v.MapIndex(key).Interface()) {
-				var bl = false
-				if strings.ToLower(key.String()) == "code" ||
-					strings.ToLower(key.String()) == "id" {
-					bl = true
+	switch token := token.(type) {
+	case json.Delim:
+		for rewrite.decoder.More() {
+			protectedChild := false
+			if token == '{' {
+				key, err := rewrite.decoder.Token()
+				if err != nil {
+					return err
 				}
-
-				if newValue, ok := newData[strings.TrimSpace(value.(string))]; ok && !bl {
-					result[key.String()] = newValue
-				}
+				name := key.(string)
+				protectedChild = strings.EqualFold(name, "id") || strings.EqualFold(name, "code")
+			}
+			if err := rewrite.value(protectedChild); err != nil {
+				return err
 			}
 		}
-		return result
-
-	case reflect.Slice, reflect.Array:
-		result := make([]interface{}, v.Len())
-		for i := 0; i < v.Len(); i++ {
-			value := recursiveGetAllValues(v.Index(i).Interface(), newData)
-			result[i] = value
-			if checkType(v.Index(i).Interface()) {
-				if newValue, ok := newData[value.(string)]; ok {
-					result[i] = newValue
-				}
-			}
+		_, err = rewrite.decoder.Token()
+		return err
+	case string:
+		if protected {
+			return nil
 		}
-		return result
-
-	case reflect.Struct:
-		result := make(map[string]interface{})
-		for i := 0; i < v.NumField(); i++ {
-			field := v.Type().Field(i)
-			value := recursiveGetAllValues(v.Field(i).Interface(), newData)
-
-			fieldTag := strings.Split(field.Tag.Get("json"), ",")[0]
-			result[fieldTag] = value
-			if checkType(v.Field(i).Interface()) {
-				var bl = false
-				if strings.ToLower(fieldTag) == "code" ||
-					strings.ToLower(fieldTag) == "id" {
-					bl = true
-				}
-				if newValue, ok := newData[value.(string)]; ok && !bl {
-					result[fieldTag] = newValue
-				}
+		text := translation.Translate(rewrite.locale, token, token)
+		if text != token {
+			end := rewrite.decoder.InputOffset()
+			// The decoder may consume a comma or colon before the value.
+			start := previous + int64(bytes.IndexByte(rewrite.raw[previous:end], '"'))
+			encoded, err := json.Marshal(text)
+			if err != nil {
+				return err
 			}
-		}
-		return result
-
-	case reflect.Interface:
-		if !v.IsNil() {
-			return recursiveGetAllValues(v.Elem().Interface(), newData)
+			rewrite.output = append(rewrite.output, rewrite.raw[rewrite.copied:start]...)
+			rewrite.output = append(rewrite.output, encoded...)
+			rewrite.copied = end
 		}
 	}
-
-	return data
+	return nil
 }

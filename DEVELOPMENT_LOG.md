@@ -31,8 +31,8 @@
 | 6 | Kafka v2 消费和关闭流程 | 已修改、验证并确认 |
 | 7 | Go 模块路径与独立发版 | `v0.0.0` 已发布并验证下载，用户要求跳过后续处理 |
 | 8 | 认证中间件的回调、白名单和错误处理 | 已修改、验证并确认，包含登录用户信息扩展 |
-| 9 | 统一响应和特殊错误匹配 | 已修改并验证，已补充跨 RPC Trace ID，待确认 |
-| 10 | 多语言转换和 JSON 序列化兼容 | 待处理 |
+| 9 | 统一响应和特殊错误匹配 | 已修改、验证并确认，包含跨 RPC Trace ID |
+| 10 | 多语言转换和 JSON 序列化兼容 | 已恢复自动匹配并验证，待确认 |
 | 11 | 请求头校验、CORS 和并发上限 | 待处理 |
 | 12 | 数据库连接错误、Redis 客户端类型和日志关闭 | 待处理 |
 | 13 | AES-GCM nonce、密钥校验和加密失败处理 | 待处理 |
@@ -159,3 +159,21 @@
 - **验证** 使用临时模拟网关和内存 RPC 拦截器，执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -v ./appMiddleware -run '^TestGatewayRequestIDAcrossAPIAndRPC$' -count=3`，通过。覆盖保留前端 ID、缺失时透传网关生成的 ID、连续请求生成不同的 ID、一次 API 请求内分别调用两个 RPC 以及嵌套 RPC，验证 `trace` 独立且一致。`git diff --check` 通过。测试启动时提示缺少 `etc/language`，未连接实际网关。
 - **测试清理** 登记验证后删除临时测试用例、overlay 配置和构建缓存，并核对临时目录已移除。
 - **待接入** 当前平台工作区未找到网关配置。待确认实际网关种类和配置路径后接入生成规则并联调。
+
+### 2026-11-18 / DEV-20261118-005 / 第 10 项多语言和 JSON 序列化
+
+- **用户确认** 新建独立的 [language-pkg](../language-pkg/DEVELOPMENT_LOG.md)。从 `content_language` 读取请求语言，统一翻译错误 `message` 和业务显式选中的 `data` 字段值。
+- **改动** `TranslateMessage` 将常用错误文案映射为稳定 Key，也接受词典 Key。原有 `SwitchLanguage` 入口改为调用业务类型的 `Localize(locale string) any`，其他响应直接交给原有编码流程。明文和 AES 响应共用翻译入口，JSON 编码由业务响应类型负责。
+- **迁移** 如已有部署使用 `etc/language`，将词条迁移到 `language-pkg/locales` 的 JSON 文件。成功响应过去依赖自动遍历翻译的字段，需要由业务显式选择。
+- **验证** 使用临时 overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -run '^Test(LocalizedResponseData|UnmarkedResponseData|LocalizedErrorResponse|DictionaryLookup)$' -count=1 -v ./common-pkg/result ./language-pkg`，四组通过。覆盖中英文和缺少词条时的回退、AES 解密后字段值、原始业务状态、`json:"-"`、`omitempty`、自定义 `MarshalJSON`、空响应及错误码与 Trace ID。工作区 `go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...`、`go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1` 和 `git diff --check` 通过。
+- **验证限制** 现有测试只做全量编译，临时用例在内存 HTTP 中运行。默认构建缓存不可写，最初工作区依赖解析也缺少本地版本和一个公开间接依赖。使用工作区 `replace`、临时缓存和 Go 校验和验证的公开依赖完成构建。模块独立发布和服务联调待进行。
+- **测试清理** 登记验证后删除本次临时测试、overlay 配置、下载文件和 Go 缓存。核对临时目录已移除，项目原有五个测试文件保留。
+
+### 2026-11-18 / DEV-20261118-006 / 第 10 项恢复自动匹配词典
+
+- **用户确认** 响应数据恢复自动翻译。业务在展示字段中填入词典 Key，成功响应按请求语言匹配，沿用 `id` 和 `code` 的跳过规则。
+- **改动** `SwitchLanguage` 先按响应类型的规则编码结构化数据，再只替换匹配词典的 JSON 字符串值。匹配覆盖嵌套对象和数组，按完整字符串匹配，字段名及大小写不敏感的 `id` 和 `code` 字符串值保持原样。原有字段标签、自定义 `MarshalJSON`、原始数字精度以及 JSON 中未匹配的值由原序列化结果保留。顶层字符串可直接翻译，字节切片沿用原先的明文和 AES 编码方式。移除第 10 项早期版本引入的 `Localize` 方法要求。
+- **接入** 业务返回 `{"status":"pending","status_label":"order.status.pending"}`，中文响应输出 `"status_label":"待支付"`，英文输出 `"status_label":"Pending payment"`。未知语言或未配置的 Key 保留原值。
+- **验证** 使用临时 overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestAutomatic(DataLocalization|ScalarResponses|LocalizationErrorEnvelope)$' -count=1 -v ./common-pkg/result`，三组通过。覆盖中英文、空语言和未知语言、明文与 AES、嵌套匹配、字段名和受保护字段、`omitempty`、`json:"-"`、自定义序列化、大数和指数原值、顶层字符串与字节、空值、错误码及 Trace ID。
+- **验证限制** 工作区 `go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...` 和 `go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1` 通过。现有测试只做全量编译，定向测试使用内存 HTTP 和测试密钥。工作区从本机缓存和临时代理读取依赖，缺少的公开依赖从 Go 公共代理下载并由 `go.work.sum` 校验。发布和部署联调待进行。
+- **测试清理** 登记验证后已删除临时测试、overlay、下载文件、日志及 Go 缓存。核对临时目录已移除，两模块无本次新增的测试文件，原有五个测试文件保留。
