@@ -1,37 +1,23 @@
 package xcode
 
 import (
+	"context"
 	"errors"
-	"github.com/K7mQ2vR9/base-pkg/result/xcode"
 	"net/http"
 
+	"github.com/K7mQ2vR9/base-pkg/result"
+	"github.com/K7mQ2vR9/base-pkg/result/xcode"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 func ErrHandler(err error) (int, any) {
-	var (
-		code int
-		msg  string
-	)
-	var xErr xcode.XCode
-	if errors.As(err, &xErr) {
-		code = xErr.Code()
-		msg = xErr.Error()
-	} else {
-		code = http.StatusInternalServerError
-	}
+	return ErrHandlerCtx(context.Background(), err)
+}
 
-	type Response struct {
-		Code int         `json:"code"`
-		Msg  string      `json:"message"`
-		Data interface{} `json:"data"`
-	}
-	return http.StatusOK, &Response{
-		Code: code,
-		Msg:  msg,
-		Data: struct{}{},
-	}
+// ErrHandlerCtx 使用请求上下文中的 trace，为 httpx.ErrorCtx 构建错误响应。
+func ErrHandlerCtx(ctx context.Context, err error) (int, any) {
+	return result.HttpErrorResponse(ctx, err)
 }
 
 func FromError(err error) *status.Status {

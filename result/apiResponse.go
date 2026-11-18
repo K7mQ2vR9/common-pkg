@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 
 	"github.com/K7mQ2vR9/base-pkg/aesGCM"
 	"github.com/K7mQ2vR9/base-pkg/headInfo"
@@ -13,7 +14,6 @@ import (
 	"github.com/K7mQ2vR9/base-pkg/result/xcode"
 
 	"github.com/zeromicro/go-zero/core/logc"
-	"github.com/zeromicro/go-zero/core/trace"
 	"github.com/zeromicro/go-zero/rest/httpx"
 )
 
@@ -53,7 +53,7 @@ func HttpSuccessResult(ctx context.Context, w http.ResponseWriter, resp interfac
 		}
 	}
 
-	success := Success(resp, trace.TraceIDFromContext(ctx))
+	success := Success(resp, headInfo.GetTrace(ctx))
 	httpx.WriteJsonCtx(ctx, w, http.StatusOK, success)
 }
 
@@ -62,39 +62,46 @@ func HttpSuccessResultNotAes(ctx context.Context, w http.ResponseWriter, resp in
 	// todo 不要打印
 	// logSucc, _ := json.Marshal(Success(resp, trace.TraceIDFromContext(ctx)))
 	// logc.Info(ctx, "ApiResponse:", fmt.Sprintf("%s", string(logSucc)))
-	success := Success(resp, trace.TraceIDFromContext(ctx))
+	success := Success(resp, headInfo.GetTrace(ctx))
 	httpx.WriteJsonCtx(ctx, w, http.StatusOK, success)
 }
 
 func HttpErrorResult(ctx context.Context, w http.ResponseWriter, err error) {
-	httpErrorResultGeneric(ctx, w, err, http.StatusOK)
+	statusCode, body := HttpErrorResponse(ctx, err)
+	httpx.WriteJsonCtx(ctx, w, statusCode, body)
 }
 
-func httpErrorResultGeneric(ctx context.Context, w http.ResponseWriter, err error, statusCode int) {
-	var (
-		xerr xcode.XCode
-		code int
-		msg  string
-	)
+// HttpErrorResponse 为业务中间件和 go-zero 的全局错误处理器生成同一个响应结构。
+func HttpErrorResponse(ctx context.Context, err error) (int, any) {
+	code, message, logDetail := publicErrorDetails(err)
+	if logDetail && err != nil {
+		logc.Errorf(ctx, "HTTP request failed: %v", err)
+	}
+	message = language.TranslateMessage(message, headInfo.GetContentLanguage(ctx))
+	return http.StatusOK, Error(code, message, headInfo.GetTrace(ctx))
+}
 
-	if statusCode == 0 {
-		statusCode = http.StatusOK
+func publicErrorDetails(err error) (int, string, bool) {
+	fallback := http.StatusText(http.StatusInternalServerError)
+	var coded xcode.XCode
+	if !errors.As(err, &coded) || coded == nil {
+		return http.StatusInternalServerError, fallback, true
+	}
+	if value := reflect.ValueOf(coded); value.Kind() == reflect.Pointer && value.IsNil() {
+		return http.StatusInternalServerError, fallback, true
 	}
 
-	if errors.As(err, &xerr) {
-		code = xerr.Code()
-		msg = xerr.Error()
-	} else {
-		code = http.StatusInternalServerError
-		msg = err.Error()
+	code := coded.Code()
+	if code >= 500 && code <= 599 {
+		if message := http.StatusText(code); message != "" {
+			return code, message, true
+		}
+		return code, fallback, true
 	}
-
-	resp := Error(code, msg, trace.TraceIDFromContext(ctx))
-
-	//go func() {
-	//	logSuc, _ := json.Marshal(resp)
-	//	logc.Info(ctx, "ApiResponse:", string(logSuc))
-	//}()
-
-	httpx.WriteJsonCtx(ctx, w, statusCode, language.SwitchLanguage(resp, headInfo.GetContentLanguage(ctx)))
+	switch coded.(type) {
+	case xcode.SpecialCodeError, *xcode.SpecialCodeError:
+		return code, coded.Message(), true
+	default:
+		return code, coded.Message(), false
+	}
 }

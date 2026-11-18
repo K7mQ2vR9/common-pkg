@@ -14,6 +14,7 @@ type Details struct {
 type XCode interface {
 	Error() string
 	Code() int
+	// Message 返回可对调用方展示的文案。
 	Message() string
 	Details() []interface{}
 }

@@ -30,8 +30,8 @@
 | 5 | Kafka v2 死信处理和位点提交 | 已修改、验证并确认 |
 | 6 | Kafka v2 消费和关闭流程 | 已修改、验证并确认 |
 | 7 | Go 模块路径与独立发版 | `v0.0.0` 已发布并验证下载，用户要求跳过后续处理 |
-| 8 | 认证中间件的回调、白名单和错误处理 | 已修改并验证，包含登录用户信息扩展，待确认 |
-| 9 | 统一响应和特殊错误匹配 | 待处理 |
+| 8 | 认证中间件的回调、白名单和错误处理 | 已修改、验证并确认，包含登录用户信息扩展 |
+| 9 | 统一响应和特殊错误匹配 | 已修改并验证，已补充跨 RPC Trace ID，待确认 |
 | 10 | 多语言转换和 JSON 序列化兼容 | 待处理 |
 | 11 | 请求头校验、CORS 和并发上限 | 待处理 |
 | 12 | 数据库连接错误、Redis 客户端类型和日志关闭 | 待处理 |
@@ -134,3 +134,28 @@
 - **验证** 使用临时 Go overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -v ./app -run '^Test(AuthenticatedUserInfoFromCallback|InvalidAuthUserInfoIsRejected|ExistingAuthCallbacksStillWork)$' -count=1`，三组通过。覆盖认证后注入、忽略外部同名头和 metadata、扩展副本隔离、匿名清除、非法 JSON 拒绝以及旧回调兼容。测试启动时提示缺少 `etc/language`，验证在本地内存中完成。`go build -mod=readonly -buildvcs=false ./...` 和 `git diff --check` 通过。
 - **测试清理** 登记验证结果后已删除临时测试用例、overlay 配置和构建缓存，并核对工作区无本次新增测试文件。
 - **下一步** 等用户确认第 8 项后开始第 9 项统一响应和特殊错误匹配。
+
+### 2026-11-18 / DEV-20261118-002 / 第 9 项统一 HTTP 错误响应和特殊错误匹配
+
+- **进度** 用户要求进入下一项，第 8 项记为已确认。第 9 项已修改并验证，等待确认。
+- **改动** `result.HttpErrorResult` 和 `logs/xcode.ErrHandlerCtx` 共用 HTTP 错误响应生成器。`app.InitAppServer` 注册带上下文的 go-zero 全局错误处理器。沿用 HTTP 200 和响应体业务码，统一 `code`、`message`、`data`、`trace`。普通错误和 5xx 错误仅展示固定提示；业务错误读取显式公开的 `Message()`，底层诊断留在服务端日志。错误响应仅翻译 `message`。旧 `ErrHandler` 签名继续可用，调用方需使用带上下文入口才能获得请求 `trace`。
+- **特殊错误** `errors.Is` 按特殊错误码匹配，`IsSpecialNotifyError` 仅识别具有通知码 410 的特殊错误，支持包裹和解包底层原因。特殊错误仅公开通用文案。原解密失败和请求缺少加密数据使用明确的 400 响应体业务码及固定提示。
+- **验证** 使用临时 overlay 执行 `go test -c -mod=readonly -buildvcs=false -overlay <临时配置> -o <临时二进制> ./app`，在临时语言目录中运行 `./app-response.test -test.run '^Test(HTTPErrorResponsesAgree|SpecialErrorsMatchByCode)$' -test.count=1`，两组通过。覆盖中间件与 go-zero 输出一致、普通和 5xx 错误脱敏、业务错误和特殊错误码、`trace`、文案翻译、空错误、错误链及解密提示。`go build -mod=readonly -buildvcs=false ./...` 和 `git diff --check` 通过。验证采用内存 HTTP 请求，未发布或联调外部服务。
+- **测试清理** 登记验证结果后已删除临时测试用例、语言样本、overlay 配置、测试二进制和构建缓存，并核对工作区无本次新增测试文件。
+- **下一步** 等用户确认第 9 项后开始第 10 项多语言和 JSON 序列化兼容。
+
+### 2026-11-18 / DEV-20261118-003 / 第 9 项补充跨 API 与 RPC Trace ID
+
+- **用户要求** 同一 API 请求及其多个 RPC 调用使用一致的 Trace ID。
+- **改动** HTTP 入口沿用有效的 OpenTelemetry 上下文或 W3C `traceparent`，两者均缺失时初始化链路。`X-Request-ID` 作为独立的 `request_id` 保留。RPC 客户端向下游注入 `traceparent` 和同值的兼容 `trace` metadata，服务端以 W3C 链路为准规范入站和出站 `trace`。响应及 go-zero 结构化日志使用同一个 OpenTelemetry Trace ID。同步修复 RPC 成功调用后空错误引用触发的 panic，原错误映射沿用既有规则。
+- **验证** 使用临时 overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> ./appMiddleware -run '^Test(TraceAcrossHTTPAndMultipleRPCs|ExistingW3CTraceIsPreserved)$' -count=3`，通过。内存 gRPC 覆盖 API 分别调用 RPC A、RPC B 及 A 再调用 B，并对比 HTTP 成功与错误响应、RPC metadata 和结构化日志。首轮测试捕获器未实现 Error 方法而失败，补齐后通过。`go build -mod=readonly -buildvcs=false ./...` 和 `git diff --check` 通过。未连接部署环境或验证链路导出。
+- **测试清理** 登记验证后已删除临时测试用例、overlay 配置及构建缓存，并核对临时目录已移除。
+- **后续开发** 用户明确要求以后先讨论方案，经确认后再开发。已记录在平台 `AGENTS.md`。第 10 项仍待方案讨论。
+
+### 2026-11-18 / DEV-20261118-004 / 核对网关请求 ID 的 API 与 RPC 传递
+
+- **用户确认** 网关优先保留前端提供的非空 `X-Request-ID`，缺失或为空时生成一次再传给 API。请求 ID 与 OpenTelemetry Trace ID 分别传递。
+- **现有实现** API 优先读取 `X-Request-ID`，以 `request_id` 写入 RPC metadata。RPC 收到后继续向下游传递同一个值。现有传递逻辑已满足该规则的 API 和 RPC 部分。
+- **验证** 使用临时模拟网关和内存 RPC 拦截器，执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -v ./appMiddleware -run '^TestGatewayRequestIDAcrossAPIAndRPC$' -count=3`，通过。覆盖保留前端 ID、缺失时透传网关生成的 ID、连续请求生成不同的 ID、一次 API 请求内分别调用两个 RPC 以及嵌套 RPC，验证 `trace` 独立且一致。`git diff --check` 通过。测试启动时提示缺少 `etc/language`，未连接实际网关。
+- **测试清理** 登记验证后删除临时测试用例、overlay 配置和构建缓存，并核对临时目录已移除。
+- **待接入** 当前平台工作区未找到网关配置。待确认实际网关种类和配置路径后接入生成规则并联调。

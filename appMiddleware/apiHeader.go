@@ -59,7 +59,7 @@ func (m *ApiHeaderMiddleware) SetNoVerify(b bool) *ApiHeaderMiddleware {
 }
 
 func (m *ApiHeaderMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+	return EnsureRequestTrace(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
 				if m.debug {
@@ -97,5 +97,5 @@ func (m *ApiHeaderMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 		newReq.Body = io.NopCloser(bytes.NewBuffer(body))
 
 		next(w, newReq)
-	}
+	})
 }

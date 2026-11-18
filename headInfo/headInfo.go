@@ -7,27 +7,8 @@ import (
 	"strings"
 
 	"github.com/K7mQ2vR9/base-pkg/consts"
-	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/metadata"
 )
-
-func GetTrace(ctx context.Context) string {
-	return trace.SpanContextFromContext(ctx).TraceID().String()
-}
-
-//
-//func SetTrace(ctx context.Context, value string) context.Context {
-//	md := ctxMd.SetMdCtxFromOut(ctx, consts.Trace, value)
-//	ctx = metadata.NewOutgoingContext(ctx, md)
-//	return ctx
-//}
-
-func SetTrace(ctx context.Context, value string) context.Context {
-	md, _ := metadata.FromOutgoingContext(ctx)
-	md = md.Copy()
-	md.Set(consts.Trace, value)
-	return metadata.NewOutgoingContext(ctx, md)
-}
 
 func GetTokenUid(ctx context.Context) int64 {
 	md, ok := metadata.FromOutgoingContext(ctx)
@@ -126,7 +107,7 @@ func SetTokenUid(ctx context.Context, value string) context.Context {
 }
 
 func GetTrance(ctx context.Context) string {
-	return trace.SpanContextFromContext(ctx).TraceID().String()
+	return GetTrace(ctx)
 }
 
 func GetContentLanguage(ctx context.Context) string {

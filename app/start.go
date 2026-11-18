@@ -93,6 +93,7 @@ func NewServerMiddleware(s *rest.Server, opt ...SMOption) *ServerMiddleware {
 
 func (s *ServerMiddleware) ApiUseMiddleware() {
 	authMiddleware := s.authMiddleware()
+	s.Server.Use(appMiddleware.EnsureRequestTrace)
 	s.Server.Use(appMiddleware.NewCorsMiddleware().Handle)
 	if s.maxConcurrency > 0 {
 		s.Server.Use(appMiddleware.NewConcurrencyLimiter(s.maxConcurrency).Handle)

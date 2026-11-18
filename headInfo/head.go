@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/K7mQ2vR9/base-pkg/consts"
-	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/zeromicro/go-zero/core/logx"
@@ -22,8 +21,9 @@ type Head struct {
 	ClientIp         string `json:"client_ip"`         // 客户端IP
 	AdminClientIp    string `json:"admin_client_ip"`   // 后台请求的客户端 IP
 	Trace            string `json:"trace"`             // 链路路由
-	TokenUid         string `json:"token_uid"`         // 用户ID
-	ReqPath          string `json:"req_path"`          // 请求path
+	RequestID        string `json:"request_id,omitempty"`
+	TokenUid         string `json:"token_uid"` // 用户ID
+	ReqPath          string `json:"req_path"`  // 请求path
 	Business         string `json:"business"`
 	BusinessCode     string `json:"business_code"`
 	ContentLanguage  string `json:"content_language"`
@@ -49,7 +49,8 @@ func (resolver ClientIPResolver) GetHead(r *http.Request) *Head {
 		Source:           strings.Trim(header.Get(consts.Source), " "),
 		ClientIp:         clientIP,
 		AdminClientIp:    clientIP,
-		Trace:            getTraceId(r),
+		Trace:            GetTrace(r.Context()),
+		RequestID:        getRequestID(r),
 		ReqPath:          r.URL.Path,
 		Business:         strings.Trim(header.Get(consts.Business), " "),
 		BusinessCode:     strings.Trim(header.Get(consts.BusinessCode), " "),
@@ -85,7 +86,7 @@ func ContextHeadInLog(ctx context.Context, h *Head) context.Context {
 		logx.Field(consts.Source, h.Source),
 		logx.Field(consts.ClientIp, h.ClientIp),
 		logx.Field(consts.AdminClientIp, h.AdminClientIp),
-		logx.Field(consts.Trace, h.Trace),
+		logx.Field(consts.RequestId, h.RequestID),
 		logx.Field(consts.TokenUid, h.TokenUid),
 		logx.Field(consts.ReqPath, h.ReqPath),
 		logx.Field(consts.Business, h.Business),
@@ -100,15 +101,11 @@ func ContextHeadInLog(ctx context.Context, h *Head) context.Context {
 	return ctxNew
 }
 
-func getTraceId(r *http.Request) string {
-	traceId := r.Header.Get("X-Request-ID")
-	if traceId == "" {
-		traceId = strings.Trim(r.Header.Get(consts.RequestId), " ")
+func getRequestID(r *http.Request) string {
+	if id := strings.TrimSpace(r.Header.Get("X-Request-ID")); id != "" {
+		return id
 	}
-	if traceId == "" {
-		traceId = trace.SpanContextFromContext(r.Context()).TraceID().String()
-	}
-	return traceId
+	return strings.TrimSpace(r.Header.Get(consts.RequestId))
 }
 
 // GetFullHead 返回原始请求头，结果可能包含认证凭证。
@@ -123,6 +120,9 @@ func GetFullHead(r *http.Request) map[string][]string {
 }
 
 func HeadInMetadata(ctx context.Context, h Head) context.Context {
+	if id := GetTrace(ctx); id != "" {
+		h.Trace = id
+	}
 	md := metadata.Pairs(
 		consts.HeaderToken, h.AuthorizationJwt,
 		consts.TokenUid, h.TokenUid,
@@ -139,6 +139,7 @@ func HeadInMetadata(ctx context.Context, h Head) context.Context {
 		consts.Timezone, h.Timezone,
 		consts.UserAgent, h.UserAgent,
 		consts.Trace, h.Trace,
+		consts.RequestId, h.RequestID,
 		consts.DeviceId, h.DeviceId,
 	)
 

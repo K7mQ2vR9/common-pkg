@@ -50,26 +50,31 @@ type SpecialCodeError struct {
 }
 
 func IsSpecialNotifyError(err error) bool {
-	return errors.Is(err, specialCodeErr)
+	return errors.Is(err, specialNotifyErr)
 }
 
 func IsSpecialCodeError(err error) (ok bool, finalErr *SpecialCodeError) {
-	finalErr = &SpecialCodeError{}
-	if errors.As(err, &finalErr) {
+	if errors.As(err, &finalErr) && finalErr != nil {
 		return true, finalErr
 	}
 
 	return false, nil
 }
 
-var specialCodeErr = &SpecialCodeError{}
+var specialNotifyErr = &SpecialCodeError{code: http.StatusGone}
 
 func (e SpecialCodeError) Error() string {
+	if e.Err == nil {
+		return e.Message()
+	}
 	return e.Err.Error()
 }
 
 // Unwrap 支持错误链解包
 func (e *SpecialCodeError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
 	return e.Err
 }
 
@@ -78,7 +83,7 @@ func (e SpecialCodeError) Code() int {
 }
 
 func (e SpecialCodeError) Message() string {
-	return e.Error()
+	return "Request failed."
 }
 
 func (e SpecialCodeError) Details() []interface{} {
@@ -88,12 +93,8 @@ func (e SpecialCodeError) Details() []interface{} {
 // Is 自定义 errors.Is 匹配规则
 // 场景：允许按错误码（Code）进行等价比对，忽略动态变化的 Message 或底层 Err
 func (e *SpecialCodeError) Is(target error) bool {
-	_, ok := target.(*SpecialCodeError)
-	if !ok {
-		return false
-	}
-
-	return true
+	other, ok := target.(*SpecialCodeError)
+	return ok && e != nil && other != nil && e.code == other.code
 }
 
 // As 自定义 errors.As 行为（可选）

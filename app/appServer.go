@@ -3,8 +3,10 @@ package app
 import (
 	"github.com/K7mQ2vR9/base-pkg/dbM"
 	"github.com/K7mQ2vR9/base-pkg/logs"
+	"github.com/K7mQ2vR9/base-pkg/logs/xcode"
 	"github.com/sirupsen/logrus"
 	"github.com/zeromicro/go-zero/core/logx"
+	"github.com/zeromicro/go-zero/rest/httpx"
 )
 
 func init() {
@@ -20,6 +22,7 @@ func logInit() {
 func InitAppServer() {
 	logInit()
 	logx.DisableStat()
+	httpx.SetErrorHandlerCtx(xcode.ErrHandlerCtx)
 }
 
 type RedisConf struct {

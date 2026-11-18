@@ -3,17 +3,18 @@ package appMiddleware
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
+	"io"
+	"net/http"
+
 	"github.com/K7mQ2vR9/base-pkg/aesGCM"
 	"github.com/K7mQ2vR9/base-pkg/consts"
 	"github.com/K7mQ2vR9/base-pkg/result"
-	"io"
-	"net/http"
+	"github.com/K7mQ2vR9/base-pkg/result/xcode"
 )
 
-var RequestDecryptError = errors.New("Request decryption failed. ")
+var RequestDecryptError error = xcode.New(http.StatusBadRequest, "Request decryption failed. ")
 
-var RequestBadError = errors.New("Request forbid. ")
+var RequestBadError error = xcode.New(http.StatusBadRequest, "Request forbid. ")
 
 type ApiRequestDecryptOption func(m *ApiRequestDecryptMiddleware)
 

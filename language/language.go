@@ -52,6 +52,16 @@ func readJson(filePath string) {
 	languageMap.Store(fileNameWithoutExt, data)
 }
 
+// TranslateMessage 查找单条响应文案，保留原有字符串类型。
+func TranslateMessage(message, language string) string {
+	if dictionary, ok := languageMap.Load(language); ok {
+		if translated, ok := dictionary.(map[string]interface{})[message].(string); ok {
+			return translated
+		}
+	}
+	return message
+}
+
 func SwitchLanguage(data interface{}, language string) interface{} {
 	defer func() {
 		if err := recover(); err != nil {
