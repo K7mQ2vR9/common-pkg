@@ -39,4 +39,5 @@ type ConfigAppServer struct {
 	SelectDb          []dbM.SelectDbConfig `json:",optional"`
 	RedisConf         *RedisConf           `json:",optional"`
 	TrustedProxyCIDRs []string             `json:",optional"`
+	MaxConcurrency    int                  `json:",optional,default=0"`
 }

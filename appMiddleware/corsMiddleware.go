@@ -1,6 +1,9 @@
 package appMiddleware
 
-import "net/http"
+import (
+	"net/http"
+	"strings"
+)
 
 type CorsMiddleware struct {
 }
@@ -11,8 +14,8 @@ func NewCorsMiddleware() *CorsMiddleware {
 
 func (m *CorsMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		setHeader(w)
-		if r.Method == "OPTIONS" {
+		setCORSHeaders(w.Header(), r)
+		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -21,21 +24,22 @@ func (m *CorsMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (m *CorsMiddleware) Handler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setHeader(w)
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusNoContent)
-		} else {
-			w.WriteHeader(http.StatusNotFound)
-		}
+	return m.Handle(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
 	})
 }
 
-// setHeader 设置响应头
-func setHeader(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
-	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Type, Access-Control-Allow-Origin, Access-Control-Allow-Headers,AuthorizationJwt")
-	w.Header().Set("Access-Control-Allow-Credentials", "true")
+func setCORSHeaders(header http.Header, request *http.Request) {
+	header.Set("Access-Control-Allow-Origin", "*")
+	header.Set("Access-Control-Allow-Headers", "*")
+	header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+	header.Set("Access-Control-Expose-Headers", "Content-Length, Content-Type, Access-Control-Allow-Origin, Access-Control-Allow-Headers,AuthorizationJwt")
+	header.Set("Access-Control-Allow-Credentials", "true")
+	if request.Method == http.MethodOptions {
+		const requestHeaders = "Access-Control-Request-Headers"
+		header.Add("Vary", requestHeaders)
+		if requested := strings.TrimSpace(strings.Join(request.Header.Values(requestHeaders), ", ")); requested != "" {
+			header.Set("Access-Control-Allow-Headers", requested)
+		}
+	}
 }

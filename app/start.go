@@ -1,6 +1,8 @@
 package app
 
 import (
+	"fmt"
+
 	"github.com/K7mQ2vR9/base-pkg/appMiddleware"
 	"github.com/zeromicro/go-zero/rest"
 )
@@ -29,6 +31,16 @@ func WithAesKeyOption(aesKey string) SMOption {
 	return func(s *ServerMiddleware) {
 		s.aesKey = aesKey
 	}
+}
+
+// WithMaxConcurrency sets the shared per-server request limit. Zero disables it.
+func WithMaxConcurrency(max int) (SMOption, error) {
+	if max < 0 {
+		return nil, fmt.Errorf("MaxConcurrency must be non-negative, got %d", max)
+	}
+	return func(s *ServerMiddleware) {
+		s.maxConcurrency = max
+	}, nil
 }
 
 func WithCheckTokenHandleSMOption(fun appMiddleware.CheckRequestTokenFunc) SMOption {

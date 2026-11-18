@@ -32,8 +32,8 @@
 | 7 | Go 模块路径与独立发版 | `v0.0.0` 已发布并验证下载，用户要求跳过后续处理 |
 | 8 | 认证中间件的回调、白名单和错误处理 | 已修改、验证并确认，包含登录用户信息扩展 |
 | 9 | 统一响应和特殊错误匹配 | 已修改、验证并确认，包含跨 RPC Trace ID |
-| 10 | 多语言转换和 JSON 序列化兼容 | 已恢复自动匹配并验证，待确认 |
-| 11 | 请求头校验、CORS 和并发上限 | 待处理 |
+| 10 | 多语言转换和 JSON 序列化兼容 | 已恢复自动匹配、验证并确认 |
+| 11 | 请求头校验、CORS 和并发上限 | 已完成确认范围内的 CORS 和并发上限调整，待确认 |
 | 12 | 数据库连接错误、Redis 客户端类型和日志关闭 | 待处理 |
 | 13 | AES-GCM nonce、密钥校验和加密失败处理 | 待处理 |
 | 14 | gRPC 客户端成功分支、服务端认证和状态码 | 待处理 |
@@ -177,3 +177,13 @@
 - **验证** 使用临时 overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestAutomatic(DataLocalization|ScalarResponses|LocalizationErrorEnvelope)$' -count=1 -v ./common-pkg/result`，三组通过。覆盖中英文、空语言和未知语言、明文与 AES、嵌套匹配、字段名和受保护字段、`omitempty`、`json:"-"`、自定义序列化、大数和指数原值、顶层字符串与字节、空值、错误码及 Trace ID。
 - **验证限制** 工作区 `go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...` 和 `go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1` 通过。现有测试只做全量编译，定向测试使用内存 HTTP 和测试密钥。工作区从本机缓存和临时代理读取依赖，缺少的公开依赖从 Go 公共代理下载并由 `go.work.sum` 校验。发布和部署联调待进行。
 - **测试清理** 登记验证后已删除临时测试、overlay、下载文件、日志及 Go 缓存。核对临时目录已移除，两模块无本次新增的测试文件，原有五个测试文件保留。
+
+### 2026-11-18 / DEV-20261118-007 / 第 11 项 CORS 请求头和实例并发上限
+
+- **用户确认** CORS 允许浏览器在预检中列出的全部请求头。API 实例共享一个可配置的并发上限。超限立即返回 HTTP `503`，预检在并发限制之前处理。
+- **CORS** `OPTIONS` 响应返回 `204`，把请求的 `Access-Control-Request-Headers` 写入 `Access-Control-Allow-Headers`，并加上 `Vary: Access-Control-Request-Headers`。已覆盖 `Authorization` 和业务自定义头。已注册的 `OPTIONS` 路由经过 API 中间件，无 `OPTIONS` 路由的已注册路径可在创建 go-zero Server 时接入 `rest.WithNotAllowedHandler(appMiddleware.NewCorsMiddleware().Handler())`。该回退处理器对其他方法返回 `404`。已有自定义回退的服务可用 `CorsMiddleware.Handle` 包装原回退逻辑。业务请求的必填头校验与认证继续由各自的中间件处理。
+- **并发** `ConfigAppServer.MaxConcurrency` 默认 `0`，通过 `app.WithMaxConcurrency` 接入 API 中间件。正数表示当前 Server 实例跨路由共享的名额，处理结束后释放。负数返回配置错误。超限使用统一 JSON 响应体，`code` 为 `503`，`message` 可按请求语言翻译，`trace` 复用当前请求的 Trace ID。
+- **接入顺序** 先调用 `app.WithMaxConcurrency(appConf.MaxConcurrency)` 并处理返回的错误。实例级限制启用时，在创建 go-zero Server 前设置 `restConf.Middlewares.MaxConns = false`。创建 Server 时配置需要的 CORS 回退，然后将并发选项传入 `app.NewServerMiddleware(server, ...)` 并调用 `ApiUseMiddleware()`。
+- **验证** 使用临时 overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -run '^Test(SharedConcurrencyLimitAcrossRoutes|ConcurrencyAndCORSConfiguration)$' -count=3 -v ./common-pkg/app`，两组各连续通过三次。覆盖两路由共享两个名额、第三个请求的状态码及响应体、中文文案和 Trace ID、释放名额后放行、饱和时的预检、显式 `OPTIONS` 路由与 go-zero 回退、多个请求头字段、默认值和负数配置。
+- **验证限制** `go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...`、`go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1` 及 `git diff --check` 通过。定向验证使用实际 go-zero 路由和内存 HTTP 请求，现有测试只做全量编译，真实浏览器、网关和部署并发值待联调。工作区依赖使用临时缓存，缺少的公开间接依赖由 `go.work.sum` 校验。
+- **测试清理** 登记验证后已删除临时用例、overlay、下载文件、日志和缓存。核对临时目录不存在，工作区保留原有五个测试文件。
