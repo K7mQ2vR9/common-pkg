@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 
+	"github.com/K7mQ2vR9/base-pkg/aesGCM"
 	"github.com/K7mQ2vR9/base-pkg/appMiddleware"
 	"github.com/zeromicro/go-zero/rest"
 )
@@ -27,10 +28,14 @@ func WithTestOption() SMOption {
 	}
 }
 
-func WithAesKeyOption(aesKey string) SMOption {
-	return func(s *ServerMiddleware) {
-		s.aesKey = aesKey
+// WithAESGCM 校验进程级加解密配置，在 ApiUseMiddleware 装配时应用，默认关闭。
+func WithAESGCM(config aesGCM.Config) (SMOption, error) {
+	if _, err := aesGCM.New(config); err != nil {
+		return nil, err
 	}
+	return func(s *ServerMiddleware) {
+		s.aesConfig = config
+	}, nil
 }
 
 // WithMaxConcurrency sets the shared per-server request limit. Zero disables it.
@@ -88,7 +93,8 @@ type ServerMiddleware struct {
 
 	isDebug bool
 	isTest  bool
-	aesKey  string
+	// aesConfig 在 API 装配时应用为进程共用的加解密配置。
+	aesConfig aesGCM.Config
 }
 
 func NewServerMiddleware(s *rest.Server, opt ...SMOption) *ServerMiddleware {
@@ -145,13 +151,9 @@ func (s *ServerMiddleware) authMiddleware() rest.Middleware {
 }
 
 func (s *ServerMiddleware) useApiRequestDecrypt() {
-	var apiOption = []appMiddleware.ApiRequestDecryptOption{
-		appMiddleware.DecryptKeyOption(s.aesKey),
+	middleware, err := appMiddleware.NewApiRequestDecryptMiddleware(s.aesConfig)
+	if err != nil {
+		panic(fmt.Errorf("invalid AES-GCM configuration: %w", err))
 	}
-	if s.isDebug {
-		apiOption = append(apiOption, appMiddleware.DecryptWithDebugFalseOption())
-	}
-	s.Server.Use(appMiddleware.NewApiRequestDecryptMiddleware(
-		apiOption...,
-	).Handle)
+	s.Server.Use(middleware.Handle)
 }

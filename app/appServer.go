@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/K7mQ2vR9/base-pkg/aesGCM"
 	"github.com/K7mQ2vR9/base-pkg/dbM"
 	"github.com/K7mQ2vR9/base-pkg/logs"
 	"github.com/K7mQ2vR9/base-pkg/logs/xcode"
@@ -34,6 +35,8 @@ type ConfigAppServer struct {
 	SelectDb []dbM.SelectDbConfig `json:",optional"`
 	// RedisConf 配置 Redis 单机或集群，nil 表示未提供 Redis 配置。
 	RedisConf *dbM.RedisConfig `json:",optional"`
+	// AESGCM 为进程共用的加解密配置，通过 WithAESGCM 接入，默认关闭。
+	AESGCM aesGCM.Config `json:",optional"`
 	// TrustedProxyCIDRs 指定可信代理网段，未配置时使用 HTTP 连接对端 IP。
 	// 通过 WithTrustedProxyCIDRs 校验并接入后，才从可信代理提供的转发头解析客户端 IP。
 	TrustedProxyCIDRs []string `json:",optional"`

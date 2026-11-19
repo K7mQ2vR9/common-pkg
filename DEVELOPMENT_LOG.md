@@ -34,8 +34,8 @@
 | 9 | 统一响应和特殊错误匹配 | 已修改、验证并确认，包含跨 RPC Trace ID |
 | 10 | 多语言转换和 JSON 序列化兼容 | 已恢复自动匹配、验证并确认 |
 | 11 | 请求头校验、CORS 和并发上限 | 已完成确认范围内的 CORS 和并发上限调整 |
-| 12 | 数据库连接错误、Redis 客户端类型和日志关闭 | MySQL、Redis 和日志关闭均已完成并验证，待确认 |
-| 13 | AES-GCM nonce、密钥校验和加密失败处理 | 待处理 |
+| 12 | 数据库连接错误、Redis 客户端类型和日志关闭 | MySQL、Redis 和日志关闭均已完成、验证并确认 |
+| 13 | AES-GCM nonce、密钥校验和加密失败处理 | 已完成并验证，待确认 |
 | 14 | gRPC 客户端成功分支、服务端认证和状态码 | 待处理 |
 | 15 | RabbitMQ 队列绑定、重连和重新订阅 | 待处理 |
 | 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | 待处理 |
@@ -280,3 +280,39 @@ go test -c -race -mod=readonly -buildvcs=false -overlay <临时配置> -o <临�
 
 - **构建与限制** go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...、go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1 和 Git 差异检查通过。现有测试做全量编译。本轮数据库请求上下文检查使用 GORM 会话，Redis 使用本地协议端，生产数据库、多节点集群切换和完整部署退出流程待联调。
 - **测试清理** 登记验证后已删除临时用例、overlay、测试二进制、日志、下载文件和 Go 缓存。核对临时目录及三份 overlay 目标文件均不存在，原有五个测试文件保留。
+
+### 2026-11-19 / DEV-20261119-005 / 第 13 项 AES-GCM 实例配置及失败处理
+
+- **用户确认** 统一使用随机 nonce，启动校验密钥，按 Server 实例保存配置。序列化及加密失败返回统一错误，完善解密失败和请求体处理。
+- **加密实现** 删除固定 nonce 的 EncryptSame，纯函数 Encrypt 和 Decrypt 共用随机 nonce 及认证逻辑。密文采用无 padding 的 URL-safe Base64，字节格式为 nonce、密文和认证标签。解密同时支持带 padding 的输入，并检查 nonce 和认证标签的最小总长度。原有固定 nonce 测试调整为随机 nonce 测试，项目原有测试文件继续保留。
+- **实例配置** 新增 aesGCM.Config 和只读 Cipher。Config.Enabled 默认 false，启用后 Config.Key 要求为 16、24 或 32 字节原始 UTF-8 字符串。ConfigAppServer.AESGCM 保存该配置，服务通过 app.WithAESGCM(config.AESGCM) 获取装配选项并处理错误，然后传入 app.NewServerMiddleware。调试模式和加密分别通过各自配置启用。
+- **接口迁移** 原来的 WithAesKeyOption、DecryptKeyOption、DecryptWithDebugFalseOption 及全局变量已替换。独立接入解密中间件时调用 NewApiRequestDecryptMiddleware(aesGCM.Config)，处理其返回的错误。加密器通过本地请求上下文供成功响应使用。
+- **错误响应** 启用 AES 时，响应序列化失败或随机源读取失败立即返回统一错误响应，响应体业务码 500，沿用 HTTP 200 和当前 Trace ID，客户端仅展示固定错误文案。请求体读取失败、无效密文或认证失败按现有 400 业务码响应。HttpSuccessResultNotAes 继续提供显式明文响应。
+- **请求体** 读取原请求体后关闭其 Reader。解密后同步重建 Body、GetBody、ContentLength 和 Content-Length，清除原 TransferEncoding。普通请求按已有规则透传，非空请求体带有 business_code 时要求提供 aes_data。已提供但为空、null 或非字符串的 aes_data 返回解密错误。
+- **定向验证** 使用临时 overlay 执行 go test -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestAES13' -count=1 -v ./common-pkg/aesGCM ./common-pkg/result ./common-pkg/app，五组通过。覆盖 16/24/32 字节密钥、随机 nonce、空明文、带 padding 密文、截断和篡改、非法密钥及短密文。真实 go-zero 路由验证两个不同密钥 Server 与关闭加密的 Server 并发处理请求，解密后的请求正文、响应及 Trace ID 正常。注入序列化和随机源失败验证错误响应，检查请求读取失败、请求体长度及 GetBody。
+- **竞态与构建** 同一组临时测试加 -race 通过。合并解密封装判断后，再执行带 -race 的 TestAES13RequestHandling，通过。go test -mod=readonly -buildvcs=false ./common-pkg/aesGCM 运行原有 AES 用例，通过。go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...、go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1 及 Git 差异检查通过。
+- **验证限制** 使用内存 HTTP 请求和实际 go-zero 路由，前端加解密及部署配置待联调。原有外部服务测试仅做编译。新增、修改的配置字段和对外接口已补充中文注释。
+- **测试清理** 登记验证后删除本次临时用例、overlay、日志、下载文件及 Go 缓存。核对临时目录与三份 overlay 目标文件已移除，项目原有五个测试文件保留。
+
+API 装配时，将已校验的 AES 选项与现有认证等选项一起传入。
+
+```go
+aesOption, err := app.WithAESGCM(config.AESGCM)
+if err != nil {
+    return err
+}
+
+middleware := app.NewServerMiddleware(server, aesOption, authOption)
+middleware.ApiUseMiddleware()
+```
+
+### 2026-11-19 / DEV-20261119-006 / 第 13 项改为配置开关控制
+
+- **用户要求** 加密器通过配置开关控制，移除请求上下文传递。
+- **配置逻辑** aesGCM.Configure 校验并应用当前进程共享的 Enabled 和 Key，默认关闭。校验失败时返回错误并保留原配置。开关与已校验的加密器作为同一份只读状态原子发布。请求解密与成功响应加密直接读取配置，因此业务传入 Background 或 TODO 上下文时仍按开关执行加密。
+- **接入** ConfigAppServer.AESGCM 和 app.WithAESGCM 的调用方式继续适用。WithAESGCM 先校验配置，在 ApiUseMiddleware 装配 API 时应用。同一进程的 API 共用这份开关和密钥。独立构造 NewApiRequestDecryptMiddleware 时也会应用传入的进程级配置。
+- **接口调整** 删除 ContextWithCipher 和 CipherFromContext，仓库 Go 源码中的引用已清理。纯 Encrypt、Decrypt 以及独立 Cipher 继续供直接加解密使用。序列化及加密失败使用第 13 项的统一错误响应。
+- **定向验证** 使用临时 overlay 执行 go test -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestAES(ConfigSwitch|ConfigConcurrentAccess|ResponseWithoutRequestContext|ConfigFailureResponses)$' -count=1 -v ./common-pkg/aesGCM ./common-pkg/result，通过。覆盖开关启停、非法密钥、原子配置读取、Background 和 TODO 上下文返回加密响应、序列化和随机源失败。
+- **装配与并发** 带 -race 运行上述用例及 TestAESConfigServerAssembly，通过实际 go-zero 路由验证加密请求、业务丢失上下文后返回加密响应，以及关闭开关后返回普通 JSON。未使用的 WithAESGCM 选项仅校验配置。配置并发发布与读取通过竞态检测。
+- **构建与限制** go test -mod=readonly -buildvcs=false ./common-pkg/aesGCM、go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...、go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1 和 Git 差异检查通过。定向验证使用内存 HTTP 与实际 go-zero 路由，前端和部署配置待联调。
+- **测试清理** 登记验证后已删除本次临时用例、overlay、日志、下载文件及 Go 缓存。核对临时目录和三份 overlay 目标文件已移除，原有五个测试文件保留。

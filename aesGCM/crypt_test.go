@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/rand"
 	"fmt"
-	"strings"
 	"testing"
 )
 
@@ -79,7 +78,8 @@ func BenchmarkDecrypt(b *testing.B) {
 	}
 }
 
-func TestEncryptSame(t *testing.T) {
+// TestEncryptRandomNonce 验证同一明文使用不同的随机 nonce，并可正常解密。
+func TestEncryptRandomNonce(t *testing.T) {
 	var (
 		key = []byte("key111kjjfkdsflahdf9829uihfu32hu")
 		str = `{
@@ -91,18 +91,18 @@ func TestEncryptSame(t *testing.T) {
 		data = []byte(str)
 	)
 
-	enStr1, err := EncryptSame(key, data)
+	enStr1, err := Encrypt(key, data)
 	if err != nil {
 		t.Error("Encrypt err:", err.Error())
 		return
 	}
-	enStr2, err := EncryptSame(key, data)
+	enStr2, err := Encrypt(key, data)
 	if err != nil {
 		t.Error("Encrypt err:", err.Error())
 		return
 	}
-	if 0 != strings.Compare(enStr1, enStr2) {
-		t.Error("Encrypt Same err:")
+	if enStr1 == enStr2 {
+		t.Error("Encrypt reused nonce")
 		return
 	}
 

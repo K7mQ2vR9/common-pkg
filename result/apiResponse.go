@@ -32,25 +32,22 @@ func interfaceToBytes(data interface{}) ([]byte, error) {
 	}
 }
 
+// HttpSuccessResult 按进程级配置开关加密响应，序列化或加密失败时返回统一错误。
 func HttpSuccessResult(ctx context.Context, w http.ResponseWriter, resp interface{}) {
 	resp = language.SwitchLanguage(resp, headInfo.GetContentLanguage(ctx))
-	// todo 不要打印
-	// logSucc, _ := json.Marshal(Success(resp, trace.TraceIDFromContext(ctx)))
-	// logc.Info(ctx, "ApiResponse:", fmt.Sprintf("%s", string(logSucc)))
 
-	if aesGCM.IsOpenAesGcm {
+	if cipher := aesGCM.ConfiguredCipher(); cipher != nil {
 		respByte, err := interfaceToBytes(resp)
 		if err != nil {
-			logc.Errorf(ctx, "Response interfaceToBytes fail: %s", err.Error())
-			resp = nil
-		} else {
-			var encryptByte string
-			encryptByte, err = aesGCM.Encrypt(aesGCM.EncryptKey, respByte)
-			if err != nil {
-				logc.Errorf(ctx, "Response encrypt fail: %s", err.Error())
-			}
-			resp = map[string]string{"aes_data": encryptByte}
+			HttpErrorResult(ctx, w, err)
+			return
 		}
+		encrypted, err := cipher.Encrypt(respByte)
+		if err != nil {
+			HttpErrorResult(ctx, w, err)
+			return
+		}
+		resp = map[string]string{"aes_data": encrypted}
 	}
 
 	success := Success(resp, headInfo.GetTrace(ctx))
