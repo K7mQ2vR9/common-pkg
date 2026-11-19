@@ -25,19 +25,19 @@ func InitAppServer() {
 	httpx.SetErrorHandlerCtx(xcode.ErrHandlerCtx)
 }
 
-type RedisConf struct {
-	Addr               string `json:",optional"`
-	Username           string `json:",optional"`
-	Password           string `json:",optional"`
-	DB                 int    `json:",optional"`
-	InsecureSkipVerify bool   `json:",optional"`
-	Type               string `json:",default=node,options=node|cluster"`
-}
-
+// ConfigAppServer 定义 API 和 RPC 可复用的应用配置，具体资源由服务初始化代码接入。
 type ConfigAppServer struct {
-	IsDebug           bool                 `json:",optional,default=false"`
-	SelectDb          []dbM.SelectDbConfig `json:",optional"`
-	RedisConf         *RedisConf           `json:",optional"`
-	TrustedProxyCIDRs []string             `json:",optional"`
-	MaxConcurrency    int                  `json:",optional,default=0"`
+	// IsDebug 为应用调试标记，默认 false，由服务启动代码决定如何使用。
+	IsDebug bool `json:",optional,default=false"`
+	// SelectDb 按 DbKey 配置多个 MySQL 连接池，每项 MySQL 使用独立的 MySQLConfig。
+	// 列表未配置时为空，MySQLConfig 未填写的可选参数使用默认值。
+	SelectDb []dbM.SelectDbConfig `json:",optional"`
+	// RedisConf 配置 Redis 单机或集群，nil 表示未提供 Redis 配置。
+	RedisConf *dbM.RedisConfig `json:",optional"`
+	// TrustedProxyCIDRs 指定可信代理网段，未配置时使用 HTTP 连接对端 IP。
+	// 通过 WithTrustedProxyCIDRs 校验并接入后，才从可信代理提供的转发头解析客户端 IP。
+	TrustedProxyCIDRs []string `json:",optional"`
+	// MaxConcurrency 为单个 API Server 跨路由共享的并发请求数上限。
+	// 默认 0 表示关闭，通过 WithMaxConcurrency 接入，负数会返回配置错误。
+	MaxConcurrency int `json:",optional,default=0"`
 }

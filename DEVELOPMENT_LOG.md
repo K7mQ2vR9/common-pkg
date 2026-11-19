@@ -33,8 +33,8 @@
 | 8 | 认证中间件的回调、白名单和错误处理 | 已修改、验证并确认，包含登录用户信息扩展 |
 | 9 | 统一响应和特殊错误匹配 | 已修改、验证并确认，包含跨 RPC Trace ID |
 | 10 | 多语言转换和 JSON 序列化兼容 | 已恢复自动匹配、验证并确认 |
-| 11 | 请求头校验、CORS 和并发上限 | 已完成确认范围内的 CORS 和并发上限调整，待确认 |
-| 12 | 数据库连接错误、Redis 客户端类型和日志关闭 | 待处理 |
+| 11 | 请求头校验、CORS 和并发上限 | 已完成确认范围内的 CORS 和并发上限调整 |
+| 12 | 数据库连接错误、Redis 客户端类型和日志关闭 | MySQL 和 Redis 已完成并验证，日志关闭待处理 |
 | 13 | AES-GCM nonce、密钥校验和加密失败处理 | 待处理 |
 | 14 | gRPC 客户端成功分支、服务端认证和状态码 | 待处理 |
 | 15 | RabbitMQ 队列绑定、重连和重新订阅 | 待处理 |
@@ -187,3 +187,67 @@
 - **验证** 使用临时 overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -run '^Test(SharedConcurrencyLimitAcrossRoutes|ConcurrencyAndCORSConfiguration)$' -count=3 -v ./common-pkg/app`，两组各连续通过三次。覆盖两路由共享两个名额、第三个请求的状态码及响应体、中文文案和 Trace ID、释放名额后放行、饱和时的预检、显式 `OPTIONS` 路由与 go-zero 回退、多个请求头字段、默认值和负数配置。
 - **验证限制** `go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...`、`go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1` 及 `git diff --check` 通过。定向验证使用实际 go-zero 路由和内存 HTTP 请求，现有测试只做全量编译，真实浏览器、网关和部署并发值待联调。工作区依赖使用临时缓存，缺少的公开间接依赖由 `go.work.sum` 校验。
 - **测试清理** 登记验证后已删除临时用例、overlay、下载文件、日志和缓存。核对临时目录不存在，工作区保留原有五个测试文件。
+
+### 2026-11-18 / DEV-20261118-008 / 第 12 项 MySQL 连接错误和上下文
+
+- **用户确认** 新项目直接替换旧 MySQL 接口。本轮先完成 MySQL 连接和上下文。
+- **启动** `ConnectMySQL(ctx, dataSource, logLevel)` 通过同一个启动上下文执行 `PingContext` 和 `SELECT VERSION()`。每个连接池最多有 5 秒，调用方的更早截止时间或取消优先。GORM 用检测到的服务端版本配置方言。错误保留可供 `errors.Is` 或 `errors.As` 判断的原因，默认错误文本省略 DSN 和驱动的原始错误。
+- **接入** 用 `NewSelectDb(startupCtx, config.SelectDb, logLevel)` 初始化连接池。空或重复的 `DbKey` 提前报错。任一库初始化失败会关闭已打开的池并返回带 `DbKey` 的错误。业务使用 `GetDb(requestCtx, dbKey)` 获取绑定请求上下文的 GORM 会话，查询和事务继承该上下文。服务退出时调用 `SelectDb.Close()`。
+- **验证** 使用临时 overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestMySQL(StartupDeadline|SelectionCleanup|RequestContext)$' -count=1 -v ./common-pkg/dbM`，三组通过。覆盖探活和版本探测卡住、默认 5 秒和调用方更短的超时、第二库失败后的池清理、错误脱敏、版本和 DSN 时区保留、启动上下文结束后继续查询、请求取消和查询超时。工作区 `go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...`、`go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1` 及 Git 差异检查通过。
+- **验证限制** 本机执行 `mysqld --no-defaults --initialize-insecure --datadir=<临时目录> --log-error=<临时日志> --tmpdir=<临时目录>` 时 MySQL 9.7.1 初始化进程收到 SIGSEGV。定向测试改用真实 Go MySQL 驱动连接内存协议模拟端，真实 MySQL 联调待进行。现有测试只做全量编译。
+- **测试清理** 登记验证后已删除临时用例、overlay、MySQL 临时数据目录和日志、下载文件与 Go 缓存。核对临时目录已移除，原有五个测试文件保留。
+
+### 2026-11-18 / DEV-20261118-009 / 第 12 项 Redis 单机和集群客户端
+
+- **用户确认** 延续新项目规则，直接替换旧的 `RedisConnect`，按配置创建单机或集群客户端。
+- **配置** `ConfigAppServer.RedisConf` 接收 `dbM.RedisConfig`。默认 `Type: node`，通过 `Addr` 配置单机地址和非负 `DB`。`Type: cluster` 使用 `Addrs` 中的种子地址并要求 `DB: 0`。一个种子地址也会创建集群客户端。地址采用 `host:port`。开启 `TLS` 后默认校验证书，`InsecureSkipVerify` 仅在明确启用 TLS 时可设置。
+- **接入** 有 Redis 配置的服务在启动时调用 `dbM.NewRedisClient(startupCtx, *config.RedisConf)`，处理返回的 `error`。启动 PING 的超时上限为 5 秒并继承更早的调用方截止时间。失败时关闭客户端，错误文本省略原始错误中的配置和服务端细节，原因可通过错误链检查。业务通过 `redis.UniversalClient` 执行命令并传入请求上下文。客户端启用命令 I/O deadline 支持。服务退出时调用客户端的 `Close()`。
+- **验证** 使用 `go test -c -mod=readonly -buildvcs=false -overlay <临时配置> -o <临时二进制> ./common-pkg/dbM` 编译定向测试，在本地回环环境执行 `<临时二进制> -test.run '^TestRedis(NodeAndCluster|StartupFailure|ConfigAndTLS)$' -test.v -test.timeout=35s`，三组通过。使用真实 Redis 单机和单节点集群验证客户端类型、单种子集群、认证和独立 DB、读写、业务请求 deadline 和客户端关闭。模拟端验证 PING 超时与失败后的连接回收、错误脱敏，以及 TLS 默认拒绝未受信任证书和显式跳过校验。首轮 TLS 用例限定了底层证书错误类型，更新临时证书和断言后通过。
+- **验证限制** `go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...`、`go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1` 及 Git 差异检查通过。现有测试只做全量编译。集群验证使用本机单节点，生产多节点切换和部署配置待联调。
+- **测试清理** 定向测试结束时停止并等待临时 Redis 进程退出。登记验证后删除临时用例、overlay、测试二进制、数据、日志、下载文件与 Go 缓存。核对临时目录已移除，原有五个测试文件保留。
+
+### 2026-11-19 / DEV-20261119-001 / 补充应用配置注释
+
+- **用户要求** 为 ConfigAppServer 添加备注，后续改动同步添加注释。
+- **改动** 配置结构及各字段增加中文注释，说明默认值、用途和实际接入方式。平台 AGENTS.md 增加后续开发的注释要求。
+- **核对** MySQL 当前固定使用 5 秒启动超时、10 个空闲连接、80 个最大连接、30 分钟连接生命周期、10 分钟最大空闲时间。连接参数配置化方案待确认。
+- **验证** 执行 gofmt -w app/appServer.go、gofmt -l app/appServer.go 及平台和公共包的 git diff --check，均通过。核对配置字段类型与标签。本次更新为注释和开发规则，未执行构建或运行测试，未创建测试用例及临时产物。
+
+### 2026-11-19 / DEV-20261119-002 / 独立 MySQL 配置与默认值
+
+- **用户确认** MySQL 的连接、连接池、超时和日志参数封装为独立结构体，未配置时走默认值。每个字段补充中文注释。
+- **配置与接口** 新增 `dbM.MySQLConfig`。每个 `SelectDbConfig` 通过 `MySQL` 字段组合连接配置。`ConnectMySQL(ctx, config)` 接收 `MySQLConfig`，`NewSelectDb(ctx, configs)` 按各库配置初始化。调用方使用请求上下文调用 `GetDb(ctx, key)`，服务退出时调用 `Close()`。
+- **默认值** 启动超时为 5s，驱动拨号超时在 DSN 也未配置时为 5s，读写超时沿用 DSN，默认 0。最大空闲连接为 10、最大连接为 80、连接生命周期为 30m、最大空闲时间为 10m。SQL 日志级别为 warn、慢 SQL 阈值为 200ms、参数占位符默认开启。
+- **参数语义** 可选数字、时长及布尔字段用指针区分缺省和显式零值，YAML 和 Go 直接传参应用相同默认值。显式配置的驱动超时覆盖 DSN。最大空闲连接为 0 表示关闭空闲连接保留，最大连接为 0 表示不限数量。连接生命周期、最大空闲时间和慢 SQL 阈值为 0 时，关闭各自的回收或阈值检查。启动超时须为正值，其余时间及连接数须非负。最大连接数为正值时，空闲连接上限须小于或等于它。全部数据库配置在打开第一个连接池前完成校验。
+- **验证** 通过临时 overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestMySQLConfig(DefaultsAndYAML|Validation|Connection)$' -count=1 -v ./common-pkg/dbM`，三组通过。覆盖最小 YAML 和 Go 结构体默认值一致、显式 0 和 false、DSN 覆盖、各项非法配置、连接池最大连接数、自定义启动超时、SQL 参数过滤、方言版本和时区保留、启动上下文取消后执行查询，以及连接池关闭。
+- **验证限制** `go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...`、`go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1` 和 Git 差异检查通过。定向连接测试使用实际 MySQL 驱动及内存协议模拟端，真实数据库环境的容量压测和联调待进行。现有测试仅做全量编译。
+- **测试清理** 登记验证后已删除临时测试用例、overlay、日志、下载文件及 Go 缓存，核对临时目录已移除，原有五个测试文件保留。
+
+最小配置只需填写数据库标识和 DSN，可选字段自动采用默认值。
+
+```yaml
+SelectDb:
+  - DbKey: main
+    MySQL:
+      DataSource: "user:password@tcp(127.0.0.1:3306)/platform?parseTime=true&loc=UTC"
+```
+
+按库调整参数时，将可选字段写在同一层。
+
+```yaml
+SelectDb:
+  - DbKey: main
+    MySQL:
+      DataSource: "user:password@tcp(127.0.0.1:3306)/platform?parseTime=true&loc=UTC"
+      StartupTimeout: 5s
+      DialTimeout: 5s
+      ReadTimeout: 3s
+      WriteTimeout: 3s
+      MaxIdleConns: 10
+      MaxOpenConns: 80
+      ConnMaxLifetime: 30m
+      ConnMaxIdleTime: 10m
+      LogLevel: warn
+      SlowThreshold: 200ms
+      ParameterizedQueries: true
+```
