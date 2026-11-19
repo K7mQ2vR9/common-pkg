@@ -1,115 +1,295 @@
 package rabbitmq
 
 import (
-	"fmt"
-	"log"
+	"context"
+	"errors"
+	"io"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/streadway/amqp"
+	"github.com/zeromicro/go-zero/core/logc"
 )
 
-type RabbitMQ struct {
-	connStr    string
-	conn       *amqp.Connection
-	channel    *amqp.Channel
-	QueueName  string
-	Exchange   string
-	RoutingKey string
+var (
+	// ErrClosed 表示客户端已关闭，不再接受发布或订阅。
+	ErrClosed = errors.New("rabbitmq client is closed")
+	// ErrNotReady 表示连接正在恢复，调用方可稍后重试。
+	ErrNotReady = errors.New("rabbitmq connection is not ready")
+	// ErrPublishUnknown 表示无法确定 broker 是否已接收，重发须沿用 MessageId，消费须按业务标识幂等。
+	ErrPublishUnknown = errors.New("rabbitmq publish result is unknown")
+	// ErrUnroutable 表示 mandatory 发布未匹配任何队列。
+	ErrUnroutable = errors.New("rabbitmq message was not routed")
+	// ErrPublishRejected 表示 broker 明确拒绝此次发布。
+	ErrPublishRejected = errors.New("rabbitmq broker rejected the publish")
+)
 
-	mu sync.Mutex
+// Handler 处理单条消息，连接失效或关闭时 ctx 会取消，成功返回 nil。
+type Handler func(ctx context.Context, body []byte) error
+
+type subscription struct {
+	handler Handler
+	ready   chan error
+	started bool
 }
 
-// NewRabbitMQ 初始化 RabbitMQ 实例
-func NewRabbitMQ(connStr, queueName, exchange, routingKey string) (*RabbitMQ, error) {
-	r := &RabbitMQ{
-		connStr:    connStr,
-		QueueName:  queueName,
-		Exchange:   exchange,
-		RoutingKey: routingKey,
-	}
+type session struct {
+	conn             brokerConnection
+	transport        io.Closer
+	publisher        brokerChannel
+	connectionClosed <-chan *amqp.Error
+	publisherClosed  <-chan *amqp.Error
+	confirms         <-chan amqp.Confirmation
+	returns          <-chan amqp.Return
+	publishLock      chan struct{}
+	nextTag          uint64
+	done             chan struct{}
+	once             sync.Once
+}
 
-	if err := r.connect(); err != nil {
+func (s *session) close() {
+	s.once.Do(func() { close(s.done); _ = s.transport.Close() })
+}
+
+// RabbitMQ 管理连接、发布确认和订阅恢复，队列参数在初始化后只读。
+type RabbitMQ struct {
+	config     settings
+	dial       dialFunc
+	ctx        context.Context
+	cancel     context.CancelFunc
+	mu         sync.RWMutex
+	session    *session
+	sub        *subscription
+	closed     bool
+	changed    chan struct{}
+	wg         sync.WaitGroup
+	closeOnce  sync.Once
+	closeErr   error
+	httpClient *http.Client
+}
+
+// NewRabbitMQ 在 ctx 时限内初始化，成功后由 Close 管理客户端生命周期。
+func NewRabbitMQ(ctx context.Context, config Config) (*RabbitMQ, error) {
+	if ctx == nil {
+		return nil, errors.New("rabbitmq startup context is required")
+	}
+	settings, err := config.settings()
+	if err != nil {
 		return nil, err
 	}
+	return newRabbitMQ(ctx, settings, amqpDialer(settings))
+}
 
-	go r.watchConnection() // 后台自动重连
+func newRabbitMQ(ctx context.Context, config settings, dial dialFunc) (*RabbitMQ, error) {
+	lifetime, cancel := context.WithCancel(context.Background())
+	r := &RabbitMQ{config: config, dial: dial, ctx: lifetime, cancel: cancel, changed: make(chan struct{}, 1),
+		httpClient: &http.Client{Timeout: config.Telegram.Timeout}}
+	s, err := r.openSession(ctx)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	r.session = s
+	r.wg.Add(1)
+	go r.run(s)
 	return r, nil
 }
 
-// connect 建立连接和通道
-func (r *RabbitMQ) connect() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	var err error
-	r.conn, err = amqp.Dial(r.connStr)
+func (r *RabbitMQ) openSession(parent context.Context) (result *session, err error) {
+	ctx, cancel := context.WithTimeout(parent, r.config.DialTimeout)
+	defer cancel()
+	conn, transport, err := r.dial(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to connect RabbitMQ: %w", err)
+		if transport != nil {
+			_ = transport.Close()
+		}
+		return nil, err
 	}
-
-	r.channel, err = r.conn.Channel()
+	s := &session{conn: conn, transport: transport, publishLock: make(chan struct{}, 1), nextTag: 1, done: make(chan struct{})}
+	stop := context.AfterFunc(ctx, s.close)
+	defer stop()
+	defer func() {
+		if err != nil {
+			s.close()
+		}
+	}()
+	s.connectionClosed = conn.NotifyClose(make(chan *amqp.Error, 1))
+	s.publisher, err = conn.Channel()
 	if err != nil {
-		return fmt.Errorf("failed to open channel: %w", err)
+		return nil, &operationError{"open publisher channel", err}
 	}
-
-	// 队列声明
-	_, err = r.channel.QueueDeclare(
-		r.QueueName,
-		true,  // durable
-		false, // autoDelete
-		false, // exclusive
-		false, // noWait
-		nil,
-	)
-	if err != nil {
-		return fmt.Errorf("queue declare failed: %w", err)
+	s.publisherClosed = s.publisher.NotifyClose(make(chan *amqp.Error, 1))
+	if err = r.declare(s.publisher); err != nil {
+		return nil, err
 	}
+	if err = s.publisher.Confirm(false); err != nil {
+		return nil, &operationError{"enable publisher confirms", err}
+	}
+	s.confirms = s.publisher.NotifyPublish(make(chan amqp.Confirmation, 1))
+	s.returns = s.publisher.NotifyReturn(make(chan amqp.Return, 1))
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
 
-	// 交换机声明
-	if r.Exchange != "" {
-		if err = r.channel.ExchangeDeclare(
-			r.Exchange,
-			"direct",
-			true,
-			false,
-			false,
-			false,
-			nil,
-		); err != nil {
-			return fmt.Errorf("exchange declare failed: %w", err)
+func (r *RabbitMQ) declare(ch brokerChannel) error {
+	c := r.config
+	if c.Exchange != "" {
+		if err := ch.ExchangeDeclare(c.Exchange, c.ExchangeType, c.exchangeDurable, false, false, false, nil); err != nil {
+			return &operationError{"declare exchange", err}
 		}
 	}
-
+	if _, err := ch.QueueDeclare(c.QueueName, c.queueDurable, c.QueueAutoDelete, c.QueueExclusive, false, nil); err != nil {
+		return &operationError{"declare business queue", err}
+	}
+	if c.Exchange != "" {
+		if err := ch.QueueBind(c.QueueName, c.RoutingKey, c.Exchange, false, nil); err != nil {
+			return &operationError{"bind business queue", err}
+		}
+	}
+	if err := ch.ExchangeDeclare(c.failedExchange, "fanout", true, false, false, false, nil); err != nil {
+		return &operationError{"declare failure exchange", err}
+	}
+	for _, name := range []string{c.RetryQueue, c.FailedQueue, c.NotifyQueue} {
+		if _, err := ch.QueueDeclare(name, true, false, false, false, nil); err != nil {
+			return &operationError{"declare auxiliary queue", err}
+		}
+	}
+	for _, name := range []string{c.FailedQueue, c.NotifyQueue} {
+		if err := ch.QueueBind(name, "", c.failedExchange, false, nil); err != nil {
+			return &operationError{"bind failure queue", err}
+		}
+	}
 	return nil
 }
 
-// Close 关闭连接
-func (r *RabbitMQ) Close() {
+func (r *RabbitMQ) invalidate(s *session) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.channel != nil {
-		_ = r.channel.Close()
+	if r.session == s {
+		r.session = nil
 	}
-	if r.conn != nil {
-		_ = r.conn.Close()
+	r.mu.Unlock()
+	s.close()
+}
+
+func (r *RabbitMQ) run(s *session) {
+	defer r.wg.Done()
+	for r.ctx.Err() == nil {
+		if s == nil {
+			var err error
+			s, err = r.openSession(r.ctx)
+			if err != nil {
+				logc.Errorf(r.ctx, "RabbitMQ reconnect failed: %v", err)
+				if !wait(r.ctx, r.config.ReconnectInterval) {
+					return
+				}
+				continue
+			}
+			r.mu.Lock()
+			if r.closed {
+				r.mu.Unlock()
+				s.close()
+				return
+			}
+			r.session = s
+			r.mu.Unlock()
+		}
+		err := r.serveSession(s)
+		if r.ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			logc.Errorf(r.ctx, "RabbitMQ session interrupted: %v", err)
+		}
+		r.invalidate(s)
+		s = nil
+		if !wait(r.ctx, r.config.ReconnectInterval) {
+			return
+		}
 	}
 }
 
-// watchConnection 自动重连
-func (r *RabbitMQ) watchConnection() {
+func (r *RabbitMQ) serveSession(s *session) error {
+	ctx, cancel := context.WithCancel(r.ctx)
+	defer cancel()
+	failures := make(chan error, 1)
+	subscribed := false
 	for {
-		if r.conn == nil || r.conn.IsClosed() {
-			log.Println("RabbitMQ connection closed, reconnecting...")
-			for {
-				if err := r.connect(); err == nil {
-					log.Println("RabbitMQ reconnected")
-					break
+		r.mu.RLock()
+		sub := r.sub
+		r.mu.RUnlock()
+		if sub != nil && !subscribed {
+			err := r.startConsumers(ctx, s, sub, failures)
+			if !sub.started {
+				if err != nil {
+					r.mu.Lock()
+					if r.sub == sub {
+						r.sub = nil
+					}
+					r.mu.Unlock()
+				} else {
+					sub.started = true
 				}
-				log.Println("Reconnect failed, retry in 5s")
-				time.Sleep(5 * time.Second)
+				sub.ready <- err
 			}
+			if err != nil {
+				return err
+			}
+			subscribed = true
 		}
-		time.Sleep(10 * time.Second)
+		select {
+		case <-r.ctx.Done():
+			return nil
+		case <-s.done:
+			return ErrNotReady
+		case <-s.connectionClosed:
+			return ErrNotReady
+		case <-s.publisherClosed:
+			return ErrNotReady
+		case err := <-failures:
+			return err
+		case <-r.changed:
+		}
+	}
+}
+
+// Close 停止重连和消费，等待处理协程收尾后关闭连接，可重复或并发调用。
+// 回调应及时响应 ctx 取消，超过 ShutdownTimeout 时关闭连接并返回超时错误。
+func (r *RabbitMQ) Close() error {
+	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		r.closed = true
+		r.mu.Unlock()
+		r.cancel()
+		finished := make(chan struct{})
+		go func() { r.wg.Wait(); close(finished) }()
+		timer := time.NewTimer(r.config.ShutdownTimeout)
+		defer timer.Stop()
+		select {
+		case <-finished:
+		case <-timer.C:
+			r.closeErr = context.DeadlineExceeded
+		}
+		r.mu.Lock()
+		s := r.session
+		r.session = nil
+		r.mu.Unlock()
+		if s != nil {
+			s.close()
+		}
+	})
+	return r.closeErr
+}
+
+func wait(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }

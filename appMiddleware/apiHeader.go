@@ -58,8 +58,9 @@ func (m *ApiHeaderMiddleware) SetNoVerify(b bool) *ApiHeaderMiddleware {
 	return m
 }
 
+// Handle 读取入口已初始化的 Trace 上下文并装配业务头；统一 ID 由路由外层负责。
 func (m *ApiHeaderMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
-	return EnsureRequestTrace(func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
 				if m.debug {
@@ -97,5 +98,5 @@ func (m *ApiHeaderMiddleware) Handle(next http.HandlerFunc) http.HandlerFunc {
 		newReq.Body = io.NopCloser(bytes.NewBuffer(body))
 
 		next(w, newReq)
-	})
+	}
 }

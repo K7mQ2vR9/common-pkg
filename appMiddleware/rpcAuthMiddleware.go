@@ -2,18 +2,12 @@ package appMiddleware
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
-	"io"
 	"runtime/debug"
 
-	"github.com/K7mQ2vR9/base-pkg/consts"
 	"github.com/K7mQ2vR9/base-pkg/headInfo"
 	"github.com/K7mQ2vR9/base-pkg/result/xcode"
 	"github.com/zeromicro/go-zero/core/logc"
-	ztrace "github.com/zeromicro/go-zero/core/trace"
-	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -40,9 +34,15 @@ func NewRpcAuthMiddleware(check CheckRPCRequestFunc) (*RpcAuthMiddleware, error)
 	return &RpcAuthMiddleware{check: check}, nil
 }
 
-// Handle 要求全部调用携带 metadata 和有效 Trace ID，再检查白名单与认证。
+// ServerOption 在原生 gRPC 链路拦截器前校验 W3C 上下文，缺失或非法链路直接拒绝。
+// go-zero 使用 server.AddOptions(auth.ServerOption(white))；同一 Server 仅设置一次主 UnaryInterceptor。
+func (m *RpcAuthMiddleware) ServerOption(getPathWhite PathWhiteHandle) grpc.ServerOption {
+	return grpc.UnaryInterceptor(m.handle(getPathWhite))
+}
+
+// handle 要求全部调用携带 metadata 和有效 W3C 链路，再检查白名单与认证。
 // 业务错误统一编码为标准 gRPC 状态和错误详情。
-func (m *RpcAuthMiddleware) Handle(getPathWhite PathWhiteHandle) grpc.UnaryServerInterceptor {
+func (m *RpcAuthMiddleware) handle(getPathWhite PathWhiteHandle) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
 		defer func() {
 			if p := recover(); p != nil {
@@ -57,11 +57,10 @@ func (m *RpcAuthMiddleware) Handle(getPathWhite PathWhiteHandle) grpc.UnaryServe
 			return nil, status.Error(codes.InvalidArgument, "RPC metadata is required")
 		}
 		md = md.Copy()
-		ctx, err = rpcTraceContext(ctx, md)
+		ctx, err = headInfo.ExtractTrace(ctx, md)
 		if err != nil {
-			return nil, err
+			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
-		md.Set(consts.Trace, headInfo.GetTrace(ctx))
 		ctx = metadata.NewIncomingContext(ctx, md.Copy())
 		ctx = metadata.NewOutgoingContext(ctx, md.Copy())
 		ctx = headInfo.ContextMetadataInLog(ctx, md)
@@ -102,53 +101,4 @@ func (m *RpcAuthMiddleware) Handle(getPathWhite PathWhiteHandle) grpc.UnaryServe
 		}
 		return resp, nil
 	}
-}
-
-// rpcTraceContext 校验传入的 W3C 或兼容 trace 字段，保留调用方提供的 Trace ID。
-// 仅 trace 字段存在时为本次接收生成 Span ID，所有链路字段均缺失时返回错误。
-func rpcTraceContext(ctx context.Context, md metadata.MD) (context.Context, error) {
-	parents := md.Get("traceparent")
-	traces := md.Get(consts.Trace)
-	if len(parents) > 1 || len(traces) > 1 {
-		return ctx, status.Error(codes.InvalidArgument, "RPC trace metadata is invalid")
-	}
-	_, parent := ztrace.Extract(context.Background(), propagation.TraceContext{}, &md)
-	if len(parents) == 1 && !parent.IsValid() {
-		return ctx, status.Error(codes.InvalidArgument, "RPC trace metadata is invalid")
-	}
-	var traceID trace.TraceID
-	if len(traces) == 1 {
-		var err error
-		traceID, err = trace.TraceIDFromHex(traces[0])
-		if err != nil {
-			return ctx, status.Error(codes.InvalidArgument, "RPC trace metadata is invalid")
-		}
-	}
-	if parent.IsValid() {
-		if traceID.IsValid() && traceID != parent.TraceID() {
-			return ctx, status.Error(codes.InvalidArgument, "RPC trace metadata is invalid")
-		}
-		if headInfo.GetTrace(ctx) != parent.TraceID().String() {
-			ctx = trace.ContextWithRemoteSpanContext(ctx, parent)
-		}
-		return ctx, nil
-	}
-	if !traceID.IsValid() {
-		return ctx, status.Error(codes.InvalidArgument, "RPC trace ID is required")
-	}
-	if headInfo.GetTrace(ctx) == traceID.String() {
-		return ctx, nil
-	}
-	var spanID trace.SpanID
-	for !spanID.IsValid() {
-		if _, err := io.ReadFull(rand.Reader, spanID[:]); err != nil {
-			logc.Errorf(ctx, "initialize RPC span: %v", err)
-			return ctx, status.Error(codes.Internal, "Internal Server Error")
-		}
-	}
-	return trace.ContextWithRemoteSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID: traceID,
-		SpanID:  spanID,
-		Remote:  true,
-	})), nil
 }

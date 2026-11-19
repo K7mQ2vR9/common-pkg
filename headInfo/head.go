@@ -21,10 +21,9 @@ type Head struct {
 	Source           string `json:"source"`            // 来源渠道
 	ClientIp         string `json:"client_ip"`         // 客户端IP
 	AdminClientIp    string `json:"admin_client_ip"`   // 后台请求的客户端 IP
-	Trace            string `json:"trace"`             // 链路路由
-	RequestID        string `json:"request_id,omitempty"`
-	TokenUid         string `json:"token_uid"` // 用户ID
-	ReqPath          string `json:"req_path"`  // 请求path
+	Trace            string `json:"trace"`             // 统一请求 ID，32 位小写十六进制，整个链路保持一致。
+	TokenUid         string `json:"token_uid"`         // 用户ID
+	ReqPath          string `json:"req_path"`          // 请求path
 	Business         string `json:"business"`
 	BusinessCode     string `json:"business_code"`
 	ContentLanguage  string `json:"content_language"`
@@ -51,7 +50,6 @@ func (resolver ClientIPResolver) GetHead(r *http.Request) *Head {
 		ClientIp:         clientIP,
 		AdminClientIp:    clientIP,
 		Trace:            GetTrace(r.Context()),
-		RequestID:        getRequestID(r),
 		ReqPath:          r.URL.Path,
 		Business:         strings.Trim(header.Get(consts.Business), " "),
 		BusinessCode:     strings.Trim(header.Get(consts.BusinessCode), " "),
@@ -88,7 +86,6 @@ func ContextHeadInLog(ctx context.Context, h *Head) context.Context {
 		logx.Field(consts.Source, h.Source),
 		logx.Field(consts.ClientIp, h.ClientIp),
 		logx.Field(consts.AdminClientIp, h.AdminClientIp),
-		logx.Field(consts.RequestId, h.RequestID),
 		logx.Field(consts.TokenUid, h.TokenUid),
 		logx.Field(consts.ReqPath, h.ReqPath),
 		logx.Field(consts.Business, h.Business),
@@ -109,13 +106,6 @@ func ContextHeadInLog(ctx context.Context, h *Head) context.Context {
 	return logx.ContextWithFields(ctx, selected...)
 }
 
-func getRequestID(r *http.Request) string {
-	if id := strings.TrimSpace(r.Header.Get("X-Request-ID")); id != "" {
-		return id
-	}
-	return strings.TrimSpace(r.Header.Get(consts.RequestId))
-}
-
 // GetFullHead 返回原始请求头，结果可能包含认证凭证。
 func GetFullHead(r *http.Request) map[string][]string {
 	headers := make(map[string][]string)
@@ -127,10 +117,8 @@ func GetFullHead(r *http.Request) map[string][]string {
 	return headers
 }
 
+// HeadInMetadata 写入 RPC 业务头和 W3C 链路，仅使用上下文中的统一 Trace ID。
 func HeadInMetadata(ctx context.Context, h Head) context.Context {
-	if id := GetTrace(ctx); id != "" {
-		h.Trace = id
-	}
 	md := metadata.Pairs(
 		consts.HeaderToken, h.AuthorizationJwt,
 		consts.TokenUid, h.TokenUid,
@@ -146,11 +134,12 @@ func HeadInMetadata(ctx context.Context, h Head) context.Context {
 		consts.OriginUrl, h.ReqOrigin,
 		consts.Timezone, h.Timezone,
 		consts.UserAgent, h.UserAgent,
-		consts.Trace, h.Trace,
-		consts.RequestId, h.RequestID,
 		consts.DeviceId, h.DeviceId,
 	)
 
 	ctxNew := metadata.NewOutgoingContext(ctx, md)
+	if GetTrace(ctx) != "" {
+		return traceMetadata(ctxNew)
+	}
 	return ctxNew
 }

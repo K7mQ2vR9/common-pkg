@@ -3,7 +3,6 @@ package interceptors
 import (
 	"context"
 
-	"github.com/K7mQ2vR9/base-pkg/consts"
 	"github.com/K7mQ2vR9/base-pkg/headInfo"
 	"github.com/K7mQ2vR9/base-pkg/result/xcode"
 	"github.com/zeromicro/go-zero/core/trace"
@@ -23,7 +22,7 @@ func ClientInterceptor(rpcName string) grpc.UnaryClientInterceptor {
 		md, _ := metadata.FromOutgoingContext(ctx)
 		md = md.Copy()
 		md.Set("rpc_name", rpcName)
-		md.Set(consts.Trace, headInfo.GetTrace(ctx))
+		// 链路仅通过标准 W3C 上下文传递，不附加重复 ID 字段。
 		trace.Inject(ctx, otel.GetTextMapPropagator(), &md)
 		trace.Inject(ctx, propagation.TraceContext{}, &md)
 		ctx = metadata.NewOutgoingContext(ctx, md)

@@ -8,9 +8,10 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// LogKeys 为 HTTP 和 RPC 日志共用的字段名单，包初始化时创建，请求处理期间只读复用。
+// LogKeys 为 HTTP 和 RPC 日志共用的业务字段名单，请求期间只读复用。
+// Trace ID 由 go-zero 从当前 Span 自动输出，不再重复记录请求 ID 别名。
 var LogKeys = []string{
-	consts.RequestId, "x-request-id", "rpc_name",
+	"rpc_name",
 	consts.ReqPath, consts.BusinessCode, consts.Business, consts.Source, consts.Version,
 	consts.ClientIp, consts.AdminClientIp, consts.TokenUid, consts.TokenUidRole,
 	consts.ContentLanguage, consts.Timezone, consts.UserAgent, consts.DeviceId, consts.OriginUrl,

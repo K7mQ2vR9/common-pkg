@@ -2,7 +2,6 @@ package consts
 
 const (
 	HeaderToken     = "authorization_jwt"
-	Trace           = "trace"
 	ClientIp        = "client_ip"
 	AdminClientIp   = "admin_client_ip"
 	UserAgent       = "user_agent"
@@ -16,7 +15,6 @@ const (
 	ContentLanguage = "content_language"
 	OriginUrl       = "origin_url"
 	Timezone        = "timezone"
-	RequestId       = "request_id"
 	DeviceId        = "device_id"
 )
 

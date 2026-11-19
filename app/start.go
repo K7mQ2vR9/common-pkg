@@ -97,6 +97,7 @@ type ServerMiddleware struct {
 	aesConfig aesGCM.Config
 }
 
+// NewServerMiddleware 装配应用中间件；Server 用 NewServer 创建，以便在原生 Span 前初始化统一 ID。
 func NewServerMiddleware(s *rest.Server, opt ...SMOption) *ServerMiddleware {
 	res := &ServerMiddleware{
 		Server: s,
@@ -111,7 +112,6 @@ func NewServerMiddleware(s *rest.Server, opt ...SMOption) *ServerMiddleware {
 
 func (s *ServerMiddleware) ApiUseMiddleware() {
 	authMiddleware := s.authMiddleware()
-	s.Server.Use(appMiddleware.EnsureRequestTrace)
 	s.Server.Use(appMiddleware.NewCorsMiddleware().Handle)
 	if s.maxConcurrency > 0 {
 		s.Server.Use(appMiddleware.NewConcurrencyLimiter(s.maxConcurrency).Handle)

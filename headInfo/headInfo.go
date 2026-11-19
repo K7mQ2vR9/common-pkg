@@ -106,10 +106,6 @@ func SetTokenUid(ctx context.Context, value string) context.Context {
 	return metadata.NewOutgoingContext(ctx, md)
 }
 
-func GetTrance(ctx context.Context) string {
-	return GetTrace(ctx)
-}
-
 func GetContentLanguage(ctx context.Context) string {
 	md, ok := metadata.FromOutgoingContext(ctx)
 	if !ok {

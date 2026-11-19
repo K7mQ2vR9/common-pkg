@@ -14,6 +14,8 @@
 
 用户请求进入 API 层，API 层按业务流程调用 RPC 层；API 和 RPC 各自复用 `common-pkg` 提供的基础能力。
 
+当前请求链路统一采用 Request ID = Trace ID，生成和接入规则见 [统一请求 ID 规则](headInfo/TRACE_ID.md)。历史记录中分别生成或允许任意 Request ID 的约定已由此规则替换。
+
 ## 当前基线
 
 - 建档基线为 `pre` 分支上的 `2b03a40`。
@@ -36,8 +38,8 @@
 | 11 | 请求头校验、CORS 和并发上限 | 已完成确认范围内的 CORS 和并发上限调整 |
 | 12 | 数据库连接错误、Redis 客户端类型和日志关闭 | MySQL、Redis 和日志关闭均已完成、验证并确认 |
 | 13 | AES-GCM nonce、密钥校验和加密失败处理 | 已完成、验证并确认，使用进程级配置开关 |
-| 14 | gRPC 客户端成功分支、服务端认证和状态码 | 已完成并验证，待确认 |
-| 15 | RabbitMQ 队列绑定、重连和重新订阅 | 待处理 |
+| 14 | gRPC 客户端成功分支、服务端认证和状态码 | 已完成、验证并确认 |
+| 15 | RabbitMQ 队列绑定、重连和重新订阅 | 已实现重试队列及耗尽后 TG 通知，已验证，待确认 |
 | 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | 待处理 |
 | 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | 待处理 |
 
@@ -337,7 +339,7 @@ auth, err := appMiddleware.NewRpcAuthMiddleware(checkCaller)
 if err != nil {
     return err
 }
-server.AddUnaryInterceptors(auth.Handle(publicMethods))
+server.AddOptions(auth.ServerOption(publicMethods))
 ```
 
 业务继续返回 xcode.New(code, message) 或特殊通知错误。使用基础包客户端拦截器后，API 可以从返回错误读取原业务码，公开文案由统一 HTTP 响应处理。
@@ -367,3 +369,76 @@ server.AddUnaryInterceptors(auth.Handle(publicMethods))
 - **验证** 临时 overlay 执行 go test -race -mod=readonly -buildvcs=false -overlay <临时配置> -run '^Test(SharedHeadLogKeys|HeadLogKeysSingleSource|HeadLogValuesPerRequest)$' -count=1 ./common-pkg/headInfo，三组通过。覆盖 HTTP 和 RPC 共用名单、字段格式、凭证及未知字段排除、业务自定义字段、原始 metadata 和并发请求的值隔离。测试中临时替换名单，确认两个入口均读取同一来源，测试结束后恢复。
 - **构建与范围** go build -mod=readonly -buildvcs=false ./common-pkg/headInfo ./common-pkg/appMiddleware、gofmt 和 Git 差异检查通过。本轮针对相关包构建和日志行为验证。
 - **测试清理** 登记验证后已删除临时用例、overlay、日志、下载文件及 Go 缓存。核对临时目录和 overlay 目标文件已移除，原有五个测试文件保留。
+
+### 2026-11-19 / DEV-20261119-011 / 第 15 项 RabbitMQ 重试及 TG 通知
+
+- **用户确认** 进入第 15 项，增加重试队列，并在重试耗尽后发送 TG 通知。第 14 项记为已确认，本项完成后等待确认。
+- **配置与接口** 新增独立 `rabbitmq.Config`、`TelegramConfig` 和 `ConfigAppServer.RabbitMQ`。新接口为 `NewRabbitMQ(ctx, config)`、`Consume(Handler)`、`Publish(ctx, amqp.Publishing)`、`PublishBatch`、`Close`；不保留旧接口。配置字段、公开接口和关键逻辑均补充中文注释。完整默认值、消息流程和调用示例见 [RabbitMQ 接入说明](amqp/rabbitMq/README.md)。
+- **连接与发布** 初始化声明业务队列并绑定具名交换机，失败立即返回并回收连接。连接、发布通道或订阅失效后重建拓扑和订阅，关闭后停止重连。所有发布启用 mandatory 和 broker 确认，区分未路由、broker 拒绝、连接未就绪和结果不确定。发布超时主动关闭当前连接以中断网络写入，取消原因保留在错误链中。默认持久化消息，并为缺少 ID 的发布生成 ID。
+- **重试与归档** 默认首次处理之外重试 3 次，间隔 30s。每次失败先转入独立重试队列，broker 确认后再单条 ACK 原消息；到期定向重投原业务队列，避免对其他交换机订阅者重复广播。重试耗尽后通过专用 fanout 交换机投递失败归档和通知任务，确认后再 ACK 当前消息。转存失败不 ACK 原消息，手动确认模式下重新入队；内部头损坏直接归档，处理器 panic 按失败处理。所有 ACK/NACK 均为 `multiple=false`，不批量确认其他失败消息。
+- **TG 通知** 默认关闭，启用时要求 BotToken 和 ChatID。业务注册消费者后启动独立通知消费者，发送服务名、队列、消息 ID、处理次数和错误摘要，不发送正文。成功后单条 ACK 通知任务；失败按独立间隔重试并遵守服务端 retry_after。TG 失败不占用业务消费者，失败归档继续保留；关闭 TG 时通知任务保存在队列，启用后处理积压。
+- **运行语义** 默认手动确认。开启 AutoAck 时原消息已自动确认，转存失败无法恢复。断线、确认丢失和 TG 响应丢失可能导致重复，业务按正文中的稳定业务标识幂等处理，生产重发沿用 MessageId。内部转存强制持久化并保留正文、消息 ID 和常用属性，不沿用原 TTL 及生产者 UserId。处理器须响应上下文取消，超过关闭时限会断开连接并返回超时，无法强制终止用户回调。
+- **定向验证** 临时 overlay 下 10 组 TestRabbit15 用例通过，并启用 -race。覆盖 YAML 与 Go 默认值、显式零值、协议数值范围、拓扑绑定和发布确认、24 个并发发布、mandatory 返回及 NACK、重试计数和延迟、转存确认先于源 ACK、转存失败不 ACK、单条确认、AutoAck 不重复确认、panic、消费者取消与连接断开后的恢复、初始化失败回收、并发重复关闭和不响应取消的回调超时。补充 net.Pipe 验证阻塞写入 deadline、初始化取消回收、等待发布锁的取消不影响其他发布，以及阻塞发布取消时保留 DeadlineExceeded。
+- **通知验证** 使用模拟 HTTP Transport 验证 TG 500 后重试成功、429 的 retry_after、凭证不进入普通错误文本、UTF-16 文本长度限制、失败任务不 ACK，以及 TG 请求阻塞时业务消息继续处理。未向实际 TG 发送消息。
+- **执行命令** 以下使用独立临时 GOCACHE 和 `GOPROXY=off`，依赖来自现有本地缓存，未新增依赖或下载文件。
+
+```text
+go test -mod=readonly -buildvcs=false ./common-pkg/amqp/rabbitMq -run '^$'
+go test -race -mod=readonly -buildvcs=false -overlay <临时配置> ./common-pkg/amqp/rabbitMq -run '^TestRabbit15' -count=1 -v -timeout=30s
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/amqp/rabbitMq common-pkg/app/appServer.go
+git -C common-pkg diff --check
+git diff --check
+```
+
+- **结果与限制** 上述验证通过。broker 测试使用驱动接口的内存模拟端，网络写超时使用 net.Pipe；环境未安装 RabbitMQ，未验证实际 broker 的持久化、节点重启和生产积压。TG 使用模拟响应，真实 BotToken、ChatID 和网络环境待服务接入时配置联调。项目原有测试本轮只做全量编译。
+- **测试清理** 清理前已登记上述测试命令、结果和限制；随后删除本次临时测试、overlay 和独立构建缓存。核对临时目录及仓库内的 overlay 目标文件均不存在，原有五个测试文件全部保留。
+
+### 2026-11-19 / DEV-20261119-012 / 合并 Request ID 与 Trace ID
+
+- **用户确认** Request ID 与 Trace ID 共用一个值，并把生成规则明确备注。当前任务实现统一 ID；RabbitMQ 处理超时、业务消息接口及其余优化仍按先讨论后开发的流程单独确认。
+- **生成与校验** 新增 `headInfo.NewTraceID` 和 `ExtractTrace`。使用 crypto/rand 读取 16 个随机字节，编码为非全零的 32 位小写十六进制字符串，无时间戳、业务前缀或连字符。全零重新生成，随机源失败返回错误。入站拒绝空值、重复值、大写、非法长度、空格及字段冲突。代码中文注释及 [统一请求 ID 规则](headInfo/TRACE_ID.md) 记录生成算法、前端 Web Crypto 示例、网关职责及各层接入方式。
+- **入口规则** HTTP 优先沿用合法输入，各 ID 与 traceparent 同时存在时必须相等，全部缺失时兜底生成；非法输入返回真实 HTTP 400，不进入业务。RPC 缺少 ID 仍直接返回 InvalidArgument。trace、request_id、x-request-id 和正文 trace 使用同一个值，Span ID 继续区分操作。HTTP 返回 X-Request-ID，CORS 允许前端读取该响应头。
+- **原生链路顺序** 新增 `app.NewServer`、`app.WithRequestTraceRouter`，在 go-zero 路由外层校验并初始化 ID，再创建原生 Trace Span 和日志，避免只改业务上下文造成导出链路不一致。仅有 ID 的新链路按服务的 Telemetry.Sampler 决定采样，有 W3C 上游上下文时保留其采样标记。新增 `RpcAuthMiddleware.ServerOption`，通过 server.AddOptions(auth.ServerOption(...)) 将入站校验放在原生 gRPC 链路拦截器前；同一 Server 只设置一次主 UnaryInterceptor。
+- **RPC 与消息传递** HTTP Head、RPC 入站/出站 metadata 和标准 W3C 头同步同一 ID，已有活动 Span 保留，复制后修改 metadata。RabbitMQ 自动复制及注入链路头，消费恢复上下文、创建消费 Span，重试、归档与 TG 告警沿用该 ID；消费者不继承生产请求的超时或取消。独立发布或外部无链路消息可生成新链路，非法消息链路不执行业务并归档。具体消息的 MessageId 保持独立。
+- **接口影响** SetTrace 现在返回 (context.Context, error)，会校验 ID 并拒绝不同活动链路。API 使用 app.NewServer 或包装后的 Router；RPC 认证使用 ServerOption 在原生链路前接入。未提供旧接口兼容层。仓库内 SetTrace 无已有调用方，调用示例及 API/RPC 子项目记录已更新。
+- **验证** 临时 overlay 下 10 组 TestUnified 用例以 -race 通过。覆盖 64 个并发 ID 生成、全零重生成、随机源失败、严格格式/重复/冲突校验、metadata 副本及活动 Span 保留、真实 go-zero HTTP 路由响应与错误入口、导出的原生 HTTP Span、API 到两级实际 gRPC 服务、无 traceparent 的原始 RPC 调用在原生 Span 前归一化、缺少 RPC ID 拒绝，以及 0/1 采样与上游采样标记保留。首轮临时用例因直接比较包含 TraceState 的结构而编译失败，改为比较 Trace ID/Span ID 后通过。
+- **消息验证** 模拟 broker 接口与 TG HTTP Transport 验证发布、消费、延迟重投、最终归档、通知和消费内 RPC 的 ID 一致，MessageId 不变、源头不被修改、Span ID 区分操作、取消生产请求后消费者继续工作，以及无链路新任务生成和非法链路归档。TG 未向真实服务发送。提取文档中的 Web Crypto 示例，用 Node 执行 1000 次格式、非零及重复值检查，通过。
+- **执行命令** 以下均使用本次独立临时 GOCACHE、GOPROXY=off 与现有本地依赖缓存；未增加或下载依赖。
+
+```text
+go test -race -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestUnified' -count=1 -v ./common-pkg/headInfo ./common-pkg/app ./common-pkg/amqp/rabbitMq -timeout=60s
+node <临时目录>/frontend-id.cjs
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l <本次修改的 Go 文件>
+git -C common-pkg diff --check
+git diff --check
+```
+
+- **结果与限制** 定向验证、竞态检测、全量构建和项目原有测试编译通过。gRPC 使用 bufconn 上的真实协议，MQ 使用内存接口模拟端；真实网关配置、真实 RabbitMQ/TG 和生产部署联调待接入。前端示例使用 Node Web Crypto 验证，未接入实际前端应用。
+- **测试清理** 清理前已登记上述命令、结果和限制；随后删除本次三份临时 Go 用例、Web Crypto 验证脚本、overlay 和独立构建缓存。核对任务临时目录及三个仓库内 overlay 目标文件均不存在，项目原有五个测试文件全部保留。
+
+### 2026-11-19 / DEV-20261119-013 / 删除旧请求 ID 字段及接入入口
+
+- **用户要求** 旧实现直接删除，不保留兼容。清理范围为本次统一请求 ID 留下的重复字段、别名函数及旧接入路径。
+- **删除项** 删除 Head.RequestID、consts.RequestId、consts.Trace、GetTrance，以及 RPC 认证中间件的公开 Handle。RPC 认证只通过 ServerOption 接入；应用中间件和 ApiHeaderMiddleware 不再重复初始化 ID，入口统一由 app.NewServer 或包装后的 Router 负责。
+- **传输与日志** HTTP 只以 X-Request-ID 对外接收和返回统一 Trace ID，正文仍使用 trace。RPC 和 RabbitMQ 只注入 W3C traceparent/tracestate，不再注入 request_id、trace 或内部 x-request-id 别名。RPC 缺少 traceparent 时直接拒绝，其他 ID 字段和已有 Span 均不能替代。HTTP 业务 Head 只保存 Trace，移除日志名单中的重复 ID 字段，日志 Trace ID 由 go-zero 从当前 Span 输出。
+- **实现** 标准链路提取 ExtractTrace 与 HTTP 入口提取 ExtractRequestTrace 分开；SetTrace 直接校验并绑定 ID。EnsureTrace 只读取出站 W3C 链路，保留 metadata 副本隔离，清除不属于当前 Span 的旧 tracestate 后重新注入。新请求的 16 字节安全随机数、32 位小写十六进制、非全零生成规则保持一致。
+- **文档** 更新统一 ID 规范和全局 AGENTS.md，移除规范中的旧字段及旧接入示例。公共包原 RPC 示例改为 ServerOption，全局及 API/RPC 子项目登记当前协议，历史验证记录继续作为开发过程留档。
+- **定向验证** 临时 overlay 执行 6 组 TestTraceClean 用例，以 -race 通过。覆盖删除字段和公开入口、拒绝旧别名作为 RPC/HTTP 链路替代、HTTP 格式及冲突校验、metadata 仅注入 W3C、业务字段保留、日志名单去重、HTTP 原生 Span 和响应 ID 一致、两级真实 gRPC 调用保持同一 Trace ID 及不同 Span ID、实际 RPC 拒绝旧字段和重复/非法 traceparent，以及 RabbitMQ 发布、消费、重试、归档与消费内 RPC 的标准传播。消息 ID 和单条 ACK 行为保持，取消生产上下文不影响消费。
+- **静态核查** Python 检查 Go 源码中无 GetTrance、旧常量引用、Head.RequestID 或 RPC 公开 Handle；链路生成及传输代码不包含旧别名写入，业务中间件的重复初始化已删除。gofmt 和 Git 差异检查通过。
+- **执行命令** 以下使用独立临时 GOCACHE、GOPROXY=off 和现有本地依赖缓存。
+
+```text
+go test -race -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestTraceClean' -count=1 -v ./common-pkg/app ./common-pkg/amqp/rabbitMq -timeout=45s
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/headInfo common-pkg/app common-pkg/appMiddleware common-pkg/rpc/interceptors common-pkg/amqp/rabbitMq common-pkg/consts/system.go
+git -C common-pkg diff --check
+git diff --check
+```
+
+- **结果与限制** 定向测试、竞态检测、全量构建及原有测试编译通过。gRPC 使用 bufconn 实际协议，MQ 为接口模拟端；实际网关、RabbitMQ/TG 及生产服务尚未联调。本次不新增依赖，不修改其他业务模块的接口。
+- **测试清理** 清理前已登记上述命令、结果和限制，随后删除两份临时用例、overlay 与独立构建缓存。核对任务临时目录和两个仓库内 overlay 目标文件均不存在，原有五个测试文件全部保留。
