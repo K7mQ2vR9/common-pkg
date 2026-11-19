@@ -2,12 +2,9 @@ package xcode
 
 import (
 	"context"
-	"errors"
-	"net/http"
 
 	"github.com/K7mQ2vR9/base-pkg/result"
 	"github.com/K7mQ2vR9/base-pkg/result/xcode"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
@@ -20,13 +17,9 @@ func ErrHandlerCtx(ctx context.Context, err error) (int, any) {
 	return result.HttpErrorResponse(ctx, err)
 }
 
+// FromError 使用统一规则构建 gRPC 状态，支持 nil 和包装后的错误。
 func FromError(err error) *status.Status {
-	var code xcode.XCode
-	if errors.As(err, &code) {
-		return status.New(codes.Code(code.Code()), code.Error())
-	}
-
-	return status.New(codes.Code(http.StatusInternalServerError), err.Error())
+	return xcode.ToGRPCStatus(err)
 }
 
 // Deprecated : 使用 pkg/xcode/New 替换

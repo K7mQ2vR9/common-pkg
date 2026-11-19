@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/K7mQ2vR9/base-pkg/consts"
@@ -80,8 +81,9 @@ func (h *Head) String() string {
 	return string(data)
 }
 
+// ContextHeadInLog 按共用 LogKeys 选择 HTTP 日志字段，字段值使用当前请求的字符串。
 func ContextHeadInLog(ctx context.Context, h *Head) context.Context {
-	ctxNew := logx.ContextWithFields(ctx,
+	fields := []logx.LogField{
 		logx.Field(consts.Version, h.Version),
 		logx.Field(consts.Source, h.Source),
 		logx.Field(consts.ClientIp, h.ClientIp),
@@ -97,8 +99,14 @@ func ContextHeadInLog(ctx context.Context, h *Head) context.Context {
 		logx.Field(consts.Timezone, h.Timezone),
 		logx.Field(consts.UserAgent, h.UserAgent),
 		logx.Field(consts.DeviceId, h.DeviceId),
-	)
-	return ctxNew
+	}
+	selected := fields[:0]
+	for _, field := range fields {
+		if slices.Contains(LogKeys, field.Key) {
+			selected = append(selected, field)
+		}
+	}
+	return logx.ContextWithFields(ctx, selected...)
 }
 
 func getRequestID(r *http.Request) string {

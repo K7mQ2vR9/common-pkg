@@ -2,7 +2,6 @@ package interceptors
 
 import (
 	"context"
-	"net/http"
 
 	"github.com/K7mQ2vR9/base-pkg/consts"
 	"github.com/K7mQ2vR9/base-pkg/headInfo"
@@ -12,19 +11,17 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 )
 
+// ClientInterceptor 复制调用 metadata 并传递链路，按统一规则恢复 RPC 业务错误。
 func ClientInterceptor(rpcName string) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		ctx, err := headInfo.EnsureTrace(ctx)
 		if err != nil {
 			return err
 		}
-		md, ok := metadata.FromOutgoingContext(ctx)
-		if !ok {
-			md = metadata.MD{}
-		}
+		md, _ := metadata.FromOutgoingContext(ctx)
+		md = md.Copy()
 		md.Set("rpc_name", rpcName)
 		md.Set(consts.Trace, headInfo.GetTrace(ctx))
 		trace.Inject(ctx, otel.GetTextMapPropagator(), &md)
@@ -34,13 +31,7 @@ func ClientInterceptor(rpcName string) grpc.UnaryClientInterceptor {
 		if err == nil {
 			return nil
 		}
-		gErr, ok := status.FromError(err)
-		if !ok {
-			return xcode.New(http.StatusInternalServerError, "Service catch err")
-		}
-
-		statusCode := http.StatusInternalServerError
-		return xcode.New(statusCode, gErr.Message())
+		return xcode.FromGRPCError(err)
 	}
 }
 

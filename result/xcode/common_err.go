@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -84,6 +86,11 @@ func (e SpecialCodeError) Code() int {
 
 func (e SpecialCodeError) Message() string {
 	return "Request failed."
+}
+
+// GRPCStatus 传递特殊业务码和通用公开文案，底层诊断保留在本地错误链。
+func (e SpecialCodeError) GRPCStatus() *status.Status {
+	return ToGRPCStatus(e)
 }
 
 func (e SpecialCodeError) Details() []interface{} {

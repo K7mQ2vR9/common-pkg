@@ -3,7 +3,6 @@ package xcode
 import (
 	"strconv"
 
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
@@ -44,15 +43,16 @@ func (c Code) Details() []interface{} {
 	return nil
 }
 
+// GRPCStatus 使用标准传输状态码，通过错误详情传递业务码和公开文案。
 func (c Code) GRPCStatus() *status.Status {
-	st := status.New(codes.Code(c.code), c.msg)
-	return st
+	return ToGRPCStatus(c)
 }
 
 func New(code int, msg string) Code {
 	return Code{code: code, msg: msg}
 }
 
+// NewRpc 创建携带业务码的 gRPC 错误。
 func NewRpc(code int, msg string) error {
 	return New(code, msg).GRPCStatus().Err()
 }

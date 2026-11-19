@@ -35,8 +35,8 @@
 | 10 | 多语言转换和 JSON 序列化兼容 | 已恢复自动匹配、验证并确认 |
 | 11 | 请求头校验、CORS 和并发上限 | 已完成确认范围内的 CORS 和并发上限调整 |
 | 12 | 数据库连接错误、Redis 客户端类型和日志关闭 | MySQL、Redis 和日志关闭均已完成、验证并确认 |
-| 13 | AES-GCM nonce、密钥校验和加密失败处理 | 已完成并验证，待确认 |
-| 14 | gRPC 客户端成功分支、服务端认证和状态码 | 待处理 |
+| 13 | AES-GCM nonce、密钥校验和加密失败处理 | 已完成、验证并确认，使用进程级配置开关 |
+| 14 | gRPC 客户端成功分支、服务端认证和状态码 | 已完成并验证，待确认 |
 | 15 | RabbitMQ 队列绑定、重连和重新订阅 | 待处理 |
 | 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | 待处理 |
 | 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | 待处理 |
@@ -316,3 +316,54 @@ middleware.ApiUseMiddleware()
 - **装配与并发** 带 -race 运行上述用例及 TestAESConfigServerAssembly，通过实际 go-zero 路由验证加密请求、业务丢失上下文后返回加密响应，以及关闭开关后返回普通 JSON。未使用的 WithAESGCM 选项仅校验配置。配置并发发布与读取通过竞态检测。
 - **构建与限制** go test -mod=readonly -buildvcs=false ./common-pkg/aesGCM、go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...、go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1 和 Git 差异检查通过。定向验证使用内存 HTTP 与实际 go-zero 路由，前端和部署配置待联调。
 - **测试清理** 登记验证后已删除本次临时用例、overlay、日志、下载文件及 Go 缓存。核对临时目录和三份 overlay 目标文件已移除，原有五个测试文件保留。
+
+### 2026-11-19 / DEV-20261119-007 / 第 14 项 RPC 认证和错误传递
+
+- **用户确认** 统一 RPC 白名单和认证回调，采用标准 gRPC 状态码，恢复 API 业务错误，显式复制调用 metadata。
+- **服务端认证** NewRpcAuthMiddleware 接收 CheckRPCRequestFunc 并返回中间件和 error，缺少回调时初始化失败。白名单支持精确方法名和末尾 * 前缀，其他方法均执行回调，包括完全缺少 metadata 的请求。回调读取 metadata 或传输层身份并校验调用方。认证失败返回 Unauthenticated，权限不足返回 PermissionDenied，取消、超时和服务不可用使用对应的标准状态。具体服务凭证策略由 RPC 项目提供。
+- **错误传递** result/xcode.ToGRPCStatus 将业务错误映射为有效的 gRPC 状态，通过标准 ErrorInfo 携带业务码、公开文案和特殊错误标记。Code.GRPCStatus、SpecialCodeError.GRPCStatus、NewRpc 及 logs/xcode.FromError 共用该规则。普通内部错误、5xx 错误和 panic 使用固定公开文案。诊断信息由服务端日志记录。
+- **客户端** 成功调用继续返回 nil。失败时通过 FromGRPCError 恢复业务码、公开文案和特殊通知错误，保留底层错误链。原生取消和超时支持 errors.Is 检查 context.Canceled 和 context.DeadlineExceeded，API 业务码分别为 499 和 504。未认证、权限不足及服务不可用分别映射为 401、403 和 503。原生 gRPC 其他状态按统一映射处理。
+- **metadata** 客户端在注入 rpc_name 和链路字段前显式复制 metadata，服务端为入站和出站上下文分别提供副本。当前 gRPC 库的读取函数也会返回副本，测试核对原始 metadata、并发调用各自的名称及相同 Trace ID，未将复制前行为描述为已复现的数据竞争。
+- **定向验证** 临时 overlay 执行 go test -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestRPC14' -count=1 ./common-pkg/result/xcode ./common-pkg/appMiddleware ./common-pkg/rpc/interceptors，通过。覆盖业务码往返、特殊通知多级传递、nil 及 typed nil 错误、包装错误的公开文案、原生状态、缺少凭证、伪造 business_code、白名单、权限拒绝和 panic。首轮捕获业务取消文案被标准文案覆盖，增加错误详情的公开文案后通过。
+- **真实协议验证** 通过 bufconn 建立实际 gRPC 服务和客户端，验证 API 错误响应、认证拒绝、多级 RPC Trace ID、业务错误与通知往返、调用过程中取消及超时。该组和全部定向用例以 -race 通过。
+- **构建与限制** go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...、go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1 及 Git 差异检查通过。原有测试做全量编译。验证范围为一元 RPC，流式 RPC、部署凭证策略及生产联调待对应服务接入时确定。
+- **补充验证** 对直接构造零值中间件的情况增加防护检查，受保护调用返回固定 Internal 文案。带 -race 运行 TestRPC14Authentication，通过。
+- **测试清理** 登记验证后删除本次临时用例、overlay、日志、下载文件和 Go 缓存。核对临时目录和四份 overlay 目标文件均已移除，原有五个测试文件保留。
+
+go-zero RPC Server 在启动前接入认证拦截器。checkCaller 是服务实现的认证回调，publicMethods 返回公开方法列表，nil 表示全部方法都经过认证。
+
+```go
+auth, err := appMiddleware.NewRpcAuthMiddleware(checkCaller)
+if err != nil {
+    return err
+}
+server.AddUnaryInterceptors(auth.Handle(publicMethods))
+```
+
+业务继续返回 xcode.New(code, message) 或特殊通知错误。使用基础包客户端拦截器后，API 可以从返回错误读取原业务码，公开文案由统一 HTTP 响应处理。
+
+### 2026-11-19 / DEV-20261119-008 / 第 14 项 RPC 必传链路信息
+
+- **用户要求** RPC metadata 为空或缺少 Trace ID 时直接返回错误。
+- **入口规则** 在白名单、认证回调和业务处理前检查传入 metadata。不存在或为空时返回 InvalidArgument。有效的 traceparent 或兼容 trace 字段可提供 Trace ID，缺失、格式错误、重复值以及两者冲突都返回 InvalidArgument，基础包客户端映射为 API 业务码 400。白名单方法执行同一入口规则。
+- **链路处理** 入站校验以实际传入的 metadata 为准，已有服务端 Span 的情况也执行该校验。保留调用方的 Trace ID，仅 trace 字段存在且需要建立 SpanContext 时生成本次接收的 Span ID。接收的 W3C 上下文和兼容 trace 字段继续用于后续 RPC 传递。
+- **定向验证** 使用临时 overlay 执行 go test -race -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestRPCTraceGate' -count=1 ./common-pkg/appMiddleware ./common-pkg/rpc/interceptors，通过。覆盖 metadata 缺失及空值、身份字段存在但链路缺失、只有服务端 Span、空和非法 Trace ID、全零 ID、非法 traceparent、重复及冲突链路字段、白名单入口校验和原始 metadata 副本。
+- **协议验证** bufconn 上的实际 gRPC 服务验证公开方法也拒绝缺少链路的调用，单独 trace 或 traceparent 能正常调用，基础包客户端注入的链路与服务端收到的 Trace ID 一致。
+- **构建与限制** go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...、go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1 和 Git 差异检查通过。本轮覆盖一元 RPC，生产入口和服务凭证配置待联调。
+- **测试清理** 登记验证后已删除本次临时用例、overlay、日志、下载文件和 Go 缓存。核对临时目录和两份 overlay 目标文件已移除，原有五个测试文件保留。
+
+### 2026-11-19 / DEV-20261119-009 / 提取 RPC 日志字段名单
+
+- **用户要求** RPC 日志字段名单定义为包级变量，请求处理时复用。
+- **改动** 将 contextMetadataInLog 中的字段名单提取为私有包级变量 rpcLogKeys，并补充中文注释。函数使用它创建本次请求的日志字段。
+- **验证** 执行 gofmt -w appMiddleware/rpcAuthMiddleware.go 和平台及公共包的 git diff --check，通过。使用 Python 静态对照 HEAD 中原名单与提取后的名单，字段内容和顺序一致，函数内的局部名单声明已移除。
+- **验证范围与清理** 本次为字段名单提取，采用语法格式和静态核对，未执行构建或运行测试，未新增测试用例和临时产物。
+
+### 2026-11-19 / DEV-20261119-010 / 日志字段统一到 headInfo
+
+- **用户要求** 日志字段名单放到 headInfo，相关位置统一引用。
+- **改动** 新增 headInfo.LogKeys，在包初始化时创建共用名单。RPC 的 metadata 日志注入迁移为 headInfo.ContextMetadataInLog，RPC 中间件改为调用它。HTTP 的 ContextHeadInLog 按同一名单选择本次请求的字段。
+- **字段与格式** 静态对照原字段名单，名称及顺序一致。HTTP 字段使用字符串，RPC metadata 字段使用字符串列表。请求字段值由各请求独立构建，已有业务自定义日志上下文字段继续参与日志输出。
+- **验证** 临时 overlay 执行 go test -race -mod=readonly -buildvcs=false -overlay <临时配置> -run '^Test(SharedHeadLogKeys|HeadLogKeysSingleSource|HeadLogValuesPerRequest)$' -count=1 ./common-pkg/headInfo，三组通过。覆盖 HTTP 和 RPC 共用名单、字段格式、凭证及未知字段排除、业务自定义字段、原始 metadata 和并发请求的值隔离。测试中临时替换名单，确认两个入口均读取同一来源，测试结束后恢复。
+- **构建与范围** go build -mod=readonly -buildvcs=false ./common-pkg/headInfo ./common-pkg/appMiddleware、gofmt 和 Git 差异检查通过。本轮针对相关包构建和日志行为验证。
+- **测试清理** 登记验证后已删除临时用例、overlay、日志、下载文件及 Go 缓存。核对临时目录和 overlay 目标文件已移除，原有五个测试文件保留。
