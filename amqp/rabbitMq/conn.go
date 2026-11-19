@@ -17,7 +17,7 @@ var (
 	ErrClosed = errors.New("rabbitmq client is closed")
 	// ErrNotReady 表示连接正在恢复，调用方可稍后重试。
 	ErrNotReady = errors.New("rabbitmq connection is not ready")
-	// ErrPublishUnknown 表示无法确定 broker 是否已接收，重发须沿用 MessageId，消费须按业务标识幂等。
+	// ErrPublishUnknown 表示无法确定 broker 是否已接收，重发须沿用 Message.ID，消费须按业务标识幂等。
 	ErrPublishUnknown = errors.New("rabbitmq publish result is unknown")
 	// ErrUnroutable 表示 mandatory 发布未匹配任何队列。
 	ErrUnroutable = errors.New("rabbitmq message was not routed")
@@ -25,8 +25,13 @@ var (
 	ErrPublishRejected = errors.New("rabbitmq broker rejected the publish")
 )
 
-// Handler 处理单条消息，连接失效或关闭时 ctx 会取消，成功返回 nil。
-type Handler func(ctx context.Context, body []byte) error
+// Handler 处理独立的业务消息快照，ACK/NACK 由客户端管理。
+// ctx 带有 HandlerTimeout 截止时间，连接失效或关闭时也会取消。
+// 生命周期仍有效且限时内返回 nil 才表示成功；超过时限即使返回 nil 也按超时失败处理。
+// 生命周期取消后不确认消息，业务 I/O 须使用传入的 ctx。
+// 回调返回后 ctx 随即取消并释放，不用于回调之外的后台任务。
+// 普通错误默认重试，Permanent 直接归档；标准 JSON 格式/类型/目标错误默认归档，可用 Retryable 覆盖。
+type Handler func(ctx context.Context, message Message) error
 
 type subscription struct {
 	handler Handler
@@ -149,17 +154,10 @@ func (r *RabbitMQ) declare(ch brokerChannel) error {
 			return &operationError{"bind business queue", err}
 		}
 	}
-	if err := ch.ExchangeDeclare(c.failedExchange, "fanout", true, false, false, false, nil); err != nil {
-		return &operationError{"declare failure exchange", err}
-	}
+	// 辅助队列通过默认交换机按队列名定向投递，失败归档与通知分别等待发布确认。
 	for _, name := range []string{c.RetryQueue, c.FailedQueue, c.NotifyQueue} {
 		if _, err := ch.QueueDeclare(name, true, false, false, false, nil); err != nil {
 			return &operationError{"declare auxiliary queue", err}
-		}
-	}
-	for _, name := range []string{c.FailedQueue, c.NotifyQueue} {
-		if err := ch.QueueBind(name, "", c.failedExchange, false, nil); err != nil {
-			return &operationError{"bind failure queue", err}
 		}
 	}
 	return nil

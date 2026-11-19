@@ -39,7 +39,7 @@
 | 12 | 数据库连接错误、Redis 客户端类型和日志关闭 | MySQL、Redis 和日志关闭均已完成、验证并确认 |
 | 13 | AES-GCM nonce、密钥校验和加密失败处理 | 已完成、验证并确认，使用进程级配置开关 |
 | 14 | gRPC 客户端成功分支、服务端认证和状态码 | 已完成、验证并确认 |
-| 15 | RabbitMQ 队列绑定、重连和重新订阅 | 已实现重试队列及耗尽后 TG 通知，已验证，待确认 |
+| 15 | RabbitMQ 队列绑定、重连和重新订阅 | 已实现重试、TG 通知、统一链路、处理超时、业务消息接口、消费错误分类和终态双份确认，已验证；后续完善逐项确认 |
 | 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | 待处理 |
 | 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | 待处理 |
 
@@ -442,3 +442,100 @@ git diff --check
 
 - **结果与限制** 定向测试、竞态检测、全量构建及原有测试编译通过。gRPC 使用 bufconn 实际协议，MQ 为接口模拟端；实际网关、RabbitMQ/TG 及生产服务尚未联调。本次不新增依赖，不修改其他业务模块的接口。
 - **测试清理** 清理前已登记上述命令、结果和限制，随后删除两份临时用例、overlay 与独立构建缓存。核对任务临时目录和两个仓库内 overlay 目标文件均不存在，原有五个测试文件全部保留。
+
+### 2026-11-19 / DEV-20261119-014 / RabbitMQ 单条业务处理超时
+
+- **用户确认** 为单条业务处理增加独立超时，默认 30s；超时后复用现有重试及耗尽后的 TG 通知。回调退出后再转存，服务关闭取消不计为业务失败。
+- **配置与接口** rabbitmq.Config 新增 HandlerTimeout，零值默认 30s，负值拒绝，支持按业务队列配置。计时覆盖每次业务回调，不包含排队、重试等待、发布确认或 TG HTTP。Handler 签名保持不变，传入的 ctx 带独立截止时间，回调结束后取消并回收。配置及关键行为增加中文注释，接入说明补充 YAML、时限范围和取消边界。
+- **处理与转存** 在原 worker 中同步调用业务，仅派生限时子上下文；超时即使回调返回 nil 仍按失败处理。超时错误保留 context.DeadlineExceeded，消费 Span 记录错误，日志包含队列、消息 ID、时限、耗时和同一个 Trace ID。回调未退出时也会记录超时，但不提前转存或创建新的业务 goroutine。正常完成时取消定时通知，避免清理调度滞后误报成功消息。
+- **重试及关闭** 转存使用原消费生命周期上下文，并由 ConfirmTimeout 独立限时，避免回调的过期上下文阻断重试或归档。等待 broker 确认后才单条 ACK 原消息，转存失败不 ACK。处理前及回调返回后均检查生命周期取消；退出或连接失效优先于超时及 nil 结果，不确认取消后的任务、不增加业务重试次数，关闭连接后由 broker 恢复投递。默认手动确认提供该语义，AutoAck 仍为尽力转存，无法恢复已自动确认的源消息。
+- **定向验证** 临时 overlay 下 11 组 TestHandlerTimeout 用例以 -race 通过。覆盖 Go/YAML 缺省与显式 0 的 30s 默认、自定义时限、负值拒绝，正常处理单条确认和回调上下文回收，panic 和下游短超时保留原行为，处理超时后的独立转存、确认前不 ACK、转存 NACK/确认超时不 ACK，超时后返回 nil 仍失败，下一条消息获得新截止时间，DeadlineExceeded 错误链、Trace ID、Span 状态和超时日志不含正文。
+- **生命周期及通知验证** 单 worker 的不响应取消回调超时后仍阻止后续业务启动，退出前不转存，退出后恢复消费；日志在等待退出期间已产生且每次处理只记录一次。验证提前父级 deadline、已取消上下文、超时后再关闭、正常关闭及关闭超时均不误 ACK 或推进业务重试。四次处理耗尽默认三次重试后归档，模拟 TG 发送一次并带超时摘要，AutoAck 不重复确认。bufconn 上实际 gRPC 服务验证处理器传入的截止时间取消下游请求，之后仍能成功转存重试消息。
+- **执行命令** 以下使用本次独立临时 GOCACHE、GOPROXY=off 和已有本地依赖缓存，无新增依赖或下载文件。
+
+```text
+go test -race -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestHandlerTimeout' -count=1 -v ./common-pkg/amqp/rabbitMq -timeout=45s
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/amqp/rabbitMq/config.go common-pkg/amqp/rabbitMq/consume.go common-pkg/amqp/rabbitMq/conn.go
+git -C common-pkg diff --check
+git diff --check
+```
+
+- **结果与限制** 定向验证、竞态检测、全量构建及原有测试编译通过。RabbitMQ 使用驱动接口的内存模拟端，TG 使用模拟 HTTP Transport，未发送实际通知；下游 RPC 使用真实 gRPC 协议的内存连接。环境未安装 RabbitMQ，真实 broker 的恢复、确认超时及部署参数待联调。Go 无法强制终止忽略 ctx 的回调，超时后返回仍可能造成业务重复，调用方须按稳定业务标识幂等处理。逐条处理错误通过日志/Span/队列观察，Consume 的返回值只表示订阅初始化。
+- **测试清理** 清理前已登记上述命令、结果和限制，随后删除临时 Go 用例、overlay 与独立构建缓存。核对任务临时目录和仓库内 overlay 目标文件均不存在，项目原有五个测试文件全部保留。
+
+### 2026-11-19 / DEV-20261119-015 / RabbitMQ 业务消息接口及使用说明
+
+- **用户确认** 简化业务接入，新增 Message、JSON 编解码、发布 ID 返回值和批量部分成功结果；旧接口直接替换。另要求独立建立带使用范例的说明文件，并确认业务自增 ID 可以用作消息 ID。
+- **消息接口** 发布和消费统一使用 Message，提供 ID、正文、普通嵌套消息头、内容属性、RetryCount、Redelivered 及投递来源。Handler 改为 func(context.Context, Message) error，不暴露协议 ACK/NACK。消费前复制正文、嵌套表、数组和二进制头，业务修改 ID、正文、持久化标记或消息头不会污染重试原文。每次回调继续受 HandlerTimeout 限制，关闭及转存确认语义保留。
+- **JSON 与发布** 新增 Message.DecodeJSON、NewJSONMessage、PublishJSON、WithMessageID、WithHeaders 和 WithCorrelationID。Publish(ctx, Message) 返回实际 ID 和 error，分配 ID 后即使发布失败也返回该 ID；JSON 编码失败不会发送，编解码错误保留标准错误链并使用不含正文的公开错误文本。NewJSONMessage 可在连接 broker 前生成稳定 ID 及 JSON 正文，供保存和批量发送。保留必要的高级内容属性，业务不必导入驱动。
+- **ID 规则** 默认生成 36 位 UUIDv7，不是自增数字，同一毫秒不保证递增。允许用 strconv.FormatInt 将业务自增 ID 转为字符串后指定，也支持业务类型/ID/事件等组合。已指定 ID 不再生成 UUID，重发及包内消费重试沿用原 ID。消息 ID 与 Trace ID 独立，当前封装不提供自动消息去重，业务负责幂等。ID 和内容短字符串按 255 字节校验，避免驱动静默截断；非法元数据在发送前拒绝。
+- **批量结果** PublishBatch(ctx, []Message) 返回 BatchResult 和 error。MessageIDs 对应输入顺序，已尝试项返回实际 ID，未尝试项保留输入 ID；ConfirmedCount 为已确认且已路由的连续前缀；FailedIndex 从 0 开始，首次失败即停止，成功或批次初始化失败为 -1。错误链支持 ErrPublishUnknown，失败那条可能已接收，其后未尝试。传入切片不修改，由调用方保留 ID 并只重发未确认部分。
+- **使用说明** 新建 [USAGE.md](amqp/rabbitMq/USAGE.md)，含初始化/消费/退出的完整 main、业务自增 ID、字节正文、离线 JSON 消息准备、稳定 ID 重发、批量部分成功恢复、错误分类和幂等职责。README 作为配置与运行入口链接该文件，删除旧 Publishing 发布及 []byte 回调范例，统一链路规范改用 Message.ID 字段名称。
+- **定向验证** 临时 overlay 执行 13 组 TestMessage 用例，-race 通过。覆盖结构体 JSON 往返和大 int64 精度、中文、空目标/语法/类型错误链、编码失败不发送且返回已分配 ID，显式业务数字/组合/大整数 ID 原样发送、自动 ID 与 24 个并发发布、常用属性与默认值、嵌套头和正文隔离、循环头和不支持类型拒绝、过长字段/非法 TTL 校验，关闭/未就绪/未路由/NACK/结果不确定时的 ID 保留。
+- **流程验证** 覆盖批量部分成功、失败停止、已分配 ID 的尾部恢复及输入切片不变；消费元数据、JSON 解码、业务修改不影响原文及 Trace ID，单条确认时序、解码失败归档、处理超时后独立转存、关闭取消不确认。检查旧的驱动 Publishing 发布签名和 []byte Handler 已删除。4 段完整 Go 使用范例均抽取到临时文件编译通过，未执行会连接真实 broker 的示例。
+- **执行命令** 以下使用本次独立临时 GOCACHE、GOPROXY=off 和现有本地依赖缓存，没有新增依赖或下载文件。
+
+```text
+go test -race -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestMessage' -count=1 -v ./common-pkg/amqp/rabbitMq -timeout=45s
+go build -mod=readonly -buildvcs=false -o <临时产物1> <临时目录>/usage_1.go
+go build -mod=readonly -buildvcs=false -o <临时产物2> <临时目录>/usage_2.go
+go build -mod=readonly -buildvcs=false -o <临时产物3> <临时目录>/usage_3.go
+go build -mod=readonly -buildvcs=false -o <临时产物4> <临时目录>/usage_4.go
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/amqp/rabbitMq/message.go common-pkg/amqp/rabbitMq/provider.go common-pkg/amqp/rabbitMq/conn.go common-pkg/amqp/rabbitMq/consume.go
+git -C common-pkg diff --check
+git diff --check
+```
+
+- **结果与限制** 定向测试、竞态检测、使用范例编译、全量构建和原有测试编译通过。broker 使用驱动接口模拟端，无实际 RabbitMQ/TG 联调或消息发送。JSON 解码错误仍按现有错误策略重试，不提前实现永久错误分类；消息去重、业务事务与失败任务持久化由业务接入。使用范例的实际运行需提供真实连接及服务配置。
+- **测试清理** 清理前已登记上述命令、结果和限制；随后删除临时测试、overlay、4 份抽取范例源码、全部范例编译产物和独立构建缓存。核对当前文档与已编译范例一致、任务临时目录和仓库内 overlay 目标文件均不存在，原有五个测试文件全部保留。
+
+
+### 2026-11-19 / DEV-20261119-016 / RabbitMQ 消费错误分类和使用范例
+
+- **用户确认** 开发消费错误分类，并单独建立带使用范例的说明文件。本次替换此前“所有 JSON 解码错误均重试”的行为，普通业务错误仍默认重试。
+- **公开接口** 新增 Permanent(err) 和 Retryable(err)，nil 输入均返回 nil，保留错误文本和错误链，支持 errors.Is/As 及 %w。先查找显式标记，外层覆盖内层；多分支按标准 errors.As 深度优先、从左到右找到第一个标记。无标记时，标准 JSON SyntaxError、UnmarshalTypeError、InvalidUnmarshalError 直接归档，其他自定义解码器错误与普通业务错误默认重试。Retryable 可覆盖默认 JSON 分类或内层 Permanent，仍受 MaxRetries 限制，不根据业务文案或 HTTP/gRPC 状态码猜测策略。
+- **消费与确认** 永久错误不进入业务重试，直接转存失败交换机；确认转存后才单条 ACK，NACK 或确认超时不 ACK 源消息。服务生命周期取消优先，不重试或确认；HandlerTimeout 仍覆盖超时后返回的 nil 或永久标记，按超时重试。归档补齐缺失消息 ID，原有业务 ID、正文及合法 Trace ID 保留。
+- **终态通知** 新增内部 x-base-failure-reason，分别保存 permanent、retries_exhausted、invalid_metadata；生产者的同名头不控制策略，业务重试移除旧终态原因。TG 按原因显示不可重试错误、重试耗尽或元数据错误，永久错误归档后即可通知，普通错误仅耗尽后通知。TG 仍默认关闭、独立重试并在发送成功后 ACK 通知任务。处理次数为本包 RetryCount+1，不统计 broker 重投的额外执行；元数据错误注明本次未执行，未知原因使用通用文案。
+- **文档与注释** 新建 [消费错误处理说明](amqp/rabbitMq/ERROR_HANDLING.md)，包含完整领域处理器与注册、显式重试、包装和 nil 的范例，说明优先级、超时、归档和 TG 行为。同步 README、USAGE 的入口与字段校验例子，以及 Handler、DecodeJSON、TelegramConfig 和关键分支的中文注释。平台与 API/RPC 开发记录同步接入约定。
+- **定向验证** 临时 overlay 的 10 组 TestProcessingPolicy 用例及竞态检测通过。覆盖 nil、errors.Is/As、%w、嵌套与多分支策略，标准 JSON 和自定义解码错误；永久错误直接归档、等待发布确认才 ACK、原文/ID/链路不变；显式重试、连续失败耗尽和零次重试；NACK/确认超时不 ACK；元数据归档原因和缺失 ID；超时与关闭优先级；三类 TG 文案、HTTP 失败后独立重试及成功后确认；普通成功与 AutoAck 不重复协议确认。
+- **执行命令** 在平台根目录执行，使用临时 GOCACHE、GOPROXY=off 和现有依赖缓存，无新增依赖。overlay、测试输出、抽取的范例和编译产物均位于 /private/tmp/new-platform-rabbit-policy.Agu6KF0T。文档通过临时 Python 抽取脚本分别编译 USAGE 的 4 段和 ERROR_HANDLING 的 3 段 Go 范例，未运行需要真实 broker 的程序。
+
+```text
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-rabbit-policy.Agu6KF0T/overlay.json -run '^TestProcessingPolicy' -count=1 -v ./common-pkg/amqp/rabbitMq -timeout=45s
+go build -mod=readonly -buildvcs=false -o <临时目录>/example_N <临时目录>/example_N.go  （N=1..7，逐一执行）
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/amqp/rabbitMq/{errors,message,consume,telegram,config,conn}.go
+git -C common-pkg diff --check
+git diff --check
+```
+
+- **结果与限制** 10 组定向测试及 -race、7 段范例编译、全量构建、原有测试编译和格式检查均通过，RabbitMQ 文档相对链接检查通过。broker 使用驱动接口模拟端、TG 使用模拟 HTTP Transport，未连接真实 RabbitMQ 或发送实际 TG 消息；真实服务、凭证、断线恢复及部署环境仍需联调。未执行原有集成测试的业务逻辑。错误分类不提供业务去重，业务须幂等。
+- **测试清理** 清理前已登记实际命令、结果和限制；随后删除本次临时测试、overlay、测试输出、7 份范例源码和编译产物及独立构建缓存。已核对任务临时目录、早先合并缓存的临时目录及仓库内 overlay 目标文件均不存在，原有五个测试文件全部保留。API/RPC 本次仅更新文档，无新增测试或临时产物。
+
+
+### 2026-11-19 / DEV-20261119-017 / RabbitMQ 失败归档与通知双份确认
+
+- **用户确认** 删除失败广播投递代码，改为先定向保存失败队列，再定向创建通知任务，两份都确认后才单条 ACK 源消息；说明部分成功后重投可能重复。
+- **实现** archive 使用默认交换机和 FailedQueue/NotifyQueue 的队列名分别发布，每次均沿用 mandatory 和发布确认，各受独立 ConfirmTimeout 限制。第一份未确认不发送第二份，任一步失败或结果不确定不 ACK；两份确认后再检查生命周期取消。错误包装区分保存失败消息和创建通知任务，保留 ErrUnroutable、ErrPublishRejected、ErrPublishUnknown 与 context 错误链。
+- **拓扑清理** 删除内部 failedExchange 字段、生成及冲突校验、失败 fanout 声明及两条绑定；仍声明业务、重试、失败和通知四个队列，具名业务交换机和绑定按业务配置保留。无旧投递兼容路径，不自动删除 broker 历史资源，无公开接口或新配置字段。
+- **语义与说明** 两份副本使用相同消息 ID、正文、失败原因和原有链路；通知关闭时仍可靠保存通知任务。发布确认丢失、第一份成功但第二份失败、源消息 ACK 失败后重投均可能重复归档或通知，业务与归档处理须幂等。外部未指定 ID 的源消息重投可能重新生成 ID，生产者应提供稳定 ID。同步 [运行说明](amqp/rabbitMq/README.md#失败归档与通知的投递确认)、[使用说明](amqp/rabbitMq/USAGE.md) 和 [错误处理说明](amqp/rabbitMq/ERROR_HANDLING.md)，补充中文关键注释。
+- **定向验证** 临时 overlay 的 10 组 TestDualArchive 测试及 -race 通过。覆盖默认/具名业务拓扑与辅助队列声明失败、删除旧保留名称约束；先归档再通知及双确认前不 ACK；两个目标分别 basic.return、NACK、确认超时、写入错误；归档前/第一份/第二份取消、取消与第二份确认同时到达、通知投递时 Close；永久错误/耗尽/JSON/业务及重试元数据错误统一归档；原文、ID、Trace 和原因一致；成功及普通重试路径；部分成功后重复处理保持已有 ID；AutoAck 不重复协议确认及源消息 ACK 失败失效连接。
+- **执行命令** 在平台根目录使用任务独立 GOCACHE=/private/tmp/new-platform-rabbit-dual.B6wkAXD9/cache 和 GOPROXY=off，复用本地依赖，无下载或新增依赖。测试源码、overlay、测试输出和缓存位于同一临时目录，没有在仓库创建测试文件。
+
+```text
+gofmt -w common-pkg/amqp/rabbitMq/config.go common-pkg/amqp/rabbitMq/conn.go common-pkg/amqp/rabbitMq/consume.go
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-rabbit-dual.B6wkAXD9/overlay.json -run '^TestDualArchive' -count=1 -v ./common-pkg/amqp/rabbitMq -timeout=45s
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/amqp/rabbitMq/{config,conn,consume}.go
+git -C common-pkg diff --check
+git diff --check
+```
+
+- **结果与限制** 10 组定向测试及竞态检测、全量构建、原有测试编译通过；格式、diff 和说明相对链接/新增锚点检查通过，原有五个测试保留。驱动接口模拟发布、确认与路由失败，无真实 RabbitMQ/TG 联调或外部消息发送；真实队列删除、重连和部署参数仍需联调。未运行原有集成测试业务逻辑。
+- **测试清理** 清理前已登记全部实际命令、结果和限制，随后删除本次临时测试、overlay、测试输出和独立构建缓存。核对任务临时目录及仓库内 overlay 目标均不存在，原有五个测试全部保留。API/RPC 本次只更新文档，无新增测试或临时产物。

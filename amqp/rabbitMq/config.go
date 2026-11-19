@@ -35,6 +35,9 @@ type Config struct {
 	ReconnectInterval time.Duration `json:",optional"`
 	// ConfirmTimeout 覆盖发布的串行等待、网络写入和 broker 确认，零值默认 5s。
 	ConfirmTimeout time.Duration `json:",optional"`
+	// HandlerTimeout 为每次业务回调的处理时限，零值默认 30s，负值非法。
+	// 仅约束回调执行，不包含排队、重试等待或转存；业务 I/O 必须传入回调的 ctx 才能及时取消。
+	HandlerTimeout time.Duration `json:",optional"`
 	// ShutdownTimeout 为关闭时等待处理协程收尾的时限，零值默认 10s。
 	ShutdownTimeout time.Duration `json:",optional"`
 	// WorkerNum 为业务消费并发数，默认 1，显式值须大于零。
@@ -60,7 +63,7 @@ type Config struct {
 	Telegram TelegramConfig `json:",optional"`
 }
 
-// TelegramConfig 配置重试耗尽后的通知发送，默认关闭。
+// TelegramConfig 配置终态失败（永久错误、重试耗尽或元数据无效）的通知发送，默认关闭。
 type TelegramConfig struct {
 	// Enabled 默认 false，启用后在注册业务消费者时启动独立通知消费者。
 	Enabled bool `json:",optional"`
@@ -78,7 +81,6 @@ type settings struct {
 	workerNum, prefetch, maxRetries           int
 	queueDurable, exchangeDurable, persistent bool
 	heartbeat                                 time.Duration
-	failedExchange                            string
 }
 
 func configValue[T any](value *T, fallback T) T {
@@ -121,10 +123,6 @@ func (config Config) settings() (settings, error) {
 	if s.ServiceName == "" {
 		s.ServiceName = s.QueueName
 	}
-	s.failedExchange = s.QueueName + ".failed.exchange"
-	if s.Exchange == s.failedExchange {
-		return s, errors.New("rabbitmq business and failure exchanges must be distinct")
-	}
 	s.workerNum = configValue(s.WorkerNum, 1)
 	s.prefetch = configValue(s.PrefetchCount, s.workerNum)
 	s.maxRetries = configValue(s.MaxRetries, 3)
@@ -140,6 +138,7 @@ func (config Config) settings() (settings, error) {
 		fallback time.Duration
 	}{
 		{&s.DialTimeout, 5 * time.Second}, {&s.ReconnectInterval, 5 * time.Second}, {&s.ConfirmTimeout, 5 * time.Second},
+		{&s.HandlerTimeout, 30 * time.Second},
 		{&s.ShutdownTimeout, 10 * time.Second}, {&s.RetryDelay, 30 * time.Second},
 		{&s.Telegram.Timeout, 5 * time.Second}, {&s.Telegram.RetryInterval, 30 * time.Second},
 	} {

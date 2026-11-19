@@ -28,9 +28,7 @@ func (r *RabbitMQ) processNotification(ctx context.Context, d amqp.Delivery) err
 		}
 	}
 	ctx = traced
-	count, _ := retryCount(d.Headers[retryCountHeader])
-	text := fmt.Sprintf("消息重试耗尽\n服务：%s\n队列：%s\n消息 ID：%s\n请求 ID：%s\n处理次数：%d\n错误摘要：%v",
-		r.config.ServiceName, r.config.QueueName, d.MessageId, headInfo.GetTrace(ctx), int64(count)+1, d.Headers[errorHeader])
+	text := r.failureNotification(ctx, d)
 	for {
 		delay, err := r.sendTelegram(ctx, text)
 		if err == nil {
@@ -47,6 +45,27 @@ func (r *RabbitMQ) processNotification(ctx context.Context, d amqp.Delivery) err
 			return ctx.Err()
 		}
 	}
+}
+
+// failureNotification 按持久化的终态原因生成告警，不把永久错误或内部元数据错误误报为重试耗尽。
+func (r *RabbitMQ) failureNotification(ctx context.Context, d amqp.Delivery) string {
+	reason, _ := d.Headers[failureReasonHeader].(string)
+	title, label, attempts := "消息处理失败", "未知归档原因", "未知"
+	switch failureReason(reason) {
+	case failurePermanent:
+		title, label = "消息不可重试错误", "永久错误"
+	case failureRetriesExhausted:
+		title, label = "消息重试耗尽", "重试次数耗尽"
+	case failureInvalidMetadata:
+		title, label, attempts = "消息元数据错误", "内部元数据无效", "本次未执行"
+	}
+	if reason == string(failurePermanent) || reason == string(failureRetriesExhausted) {
+		if count, err := retryCount(d.Headers[retryCountHeader]); err == nil {
+			attempts = fmt.Sprintf("%d", int64(count)+1)
+		}
+	}
+	return fmt.Sprintf("%s\n归档原因：%s\n服务：%s\n队列：%s\n消息 ID：%s\nTrace ID：%s\n处理次数：%s\n错误摘要：%v",
+		title, label, r.config.ServiceName, r.config.QueueName, d.MessageId, headInfo.GetTrace(ctx), attempts, d.Headers[errorHeader])
 }
 
 func (r *RabbitMQ) sendTelegram(parent context.Context, text string) (time.Duration, error) {

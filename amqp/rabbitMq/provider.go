@@ -3,67 +3,90 @@ package rabbitmq
 import (
 	"context"
 	"errors"
-	"time"
+	"fmt"
 
-	"github.com/K7mQ2vR9/base-pkg/commonTool"
 	"github.com/streadway/amqp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Publish 发送一条消息，成功表示 broker 已确认且消息已路由。
-// MessageId、ContentType、Timestamp 和 DeliveryMode 未填时使用默认值。
-// 消息头中的 Request ID 与 Trace ID 沿用当前链路，冲突返回错误；独立发布缺少链路时生成一次。
-func (r *RabbitMQ) Publish(ctx context.Context, message amqp.Publishing) error {
+// Publish 发布业务消息并返回实际 ID，nil 错误表示 broker 已确认且消息已路由。
+// 分配 ID 后的任何失败都返回该 ID；结果不确定时重发须沿用同一 ID，并由业务实现幂等。
+// 正文及 Headers 复制后发送，目标取 Config，消费专用字段不参与发布。
+func (r *RabbitMQ) Publish(ctx context.Context, message Message) (string, error) {
 	if ctx == nil {
-		return errors.New("rabbitmq publish context is required")
+		return message.ID, errors.New("rabbitmq publish context is required")
 	}
-	ctx, err := messageTraceContext(ctx, message.Headers)
+	id, err := resolveMessageID(message.ID)
 	if err != nil {
-		return err
+		return id, err
 	}
-	ctx, span := otel.Tracer("base-pkg/rabbitmq").Start(ctx, "publish "+r.config.QueueName, trace.WithSpanKind(trace.SpanKindProducer))
-	defer span.End()
-	message.Headers = messageTraceHeaders(ctx, message.Headers)
-	if message.MessageId == "" {
-		id, err := commonTool.NewUUidV7()
-		if err != nil {
-			return &operationError{"generate message ID", err}
-		}
-		message.MessageId = id
-	}
-	if message.ContentType == "" {
-		message.ContentType = "application/json"
-	}
-	if message.Timestamp.IsZero() {
-		message.Timestamp = time.Now().UTC()
-	}
-	if message.DeliveryMode == 0 {
-		message.DeliveryMode = amqp.Transient
-		if r.config.persistent {
-			message.DeliveryMode = amqp.Persistent
-		}
+	message.ID = id
+	if err := ctx.Err(); err != nil {
+		return id, err
 	}
 	r.mu.RLock()
 	s, closed := r.session, r.closed
 	r.mu.RUnlock()
 	if closed {
-		return ErrClosed
+		return id, ErrClosed
 	}
 	if s == nil {
-		return ErrNotReady
+		return id, ErrNotReady
 	}
-	return r.publishOn(ctx, s, r.config.Exchange, r.config.RoutingKey, message)
+	wire, err := message.publishing(r.config.persistent)
+	if err != nil {
+		return id, err
+	}
+	ctx, err = messageTraceContext(ctx, wire.Headers)
+	if err != nil {
+		return id, err
+	}
+	ctx, span := otel.Tracer("base-pkg/rabbitmq").Start(ctx, "publish "+r.config.QueueName, trace.WithSpanKind(trace.SpanKindProducer))
+	defer span.End()
+	wire.Headers = messageTraceHeaders(ctx, wire.Headers)
+	return id, r.publishOn(ctx, s, r.config.Exchange, r.config.RoutingKey, wire)
 }
 
-// PublishBatch 按顺序等待各条发布确认，部分成功后返回错误时由调用方按 MessageId 幂等重试。
-func (r *RabbitMQ) PublishBatch(ctx context.Context, messages []amqp.Publishing) error {
-	for _, message := range messages {
-		if err := r.Publish(ctx, message); err != nil {
-			return err
-		}
+// PublishJSON 构造并发布 JSON 消息，未指定 ID 时自动生成；序列化失败不向 broker 发送。
+// 分配后即使失败也返回消息 ID，底层错误支持 errors.Is/As。
+func (r *RabbitMQ) PublishJSON(ctx context.Context, data any, options ...PublishOption) (string, error) {
+	if ctx == nil {
+		return "", errors.New("rabbitmq publish context is required")
 	}
-	return nil
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	message, err := NewJSONMessage(data, options...)
+	if err != nil {
+		return message.ID, err
+	}
+	return r.Publish(ctx, message)
+}
+
+// PublishBatch 按输入顺序逐条等待确认，首次失败即停止，并返回实际 ID、已确认前缀数量及失败位置。
+// 未尝试项保留原 ID，原 ID 为空时不分配；输入切片不修改，不自动重发部分成功的批次。
+func (r *RabbitMQ) PublishBatch(ctx context.Context, messages []Message) (BatchResult, error) {
+	result := BatchResult{MessageIDs: make([]string, len(messages)), FailedIndex: -1}
+	for index, message := range messages {
+		result.MessageIDs[index] = message.ID
+	}
+	if ctx == nil {
+		return result, errors.New("rabbitmq publish context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	for index, message := range messages {
+		id, err := r.Publish(ctx, message)
+		result.MessageIDs[index] = id
+		if err != nil {
+			result.FailedIndex = index
+			return result, fmt.Errorf("rabbitmq batch message %d: %w", index, err)
+		}
+		result.ConfirmedCount++
+	}
+	return result, nil
 }
 
 func (r *RabbitMQ) publishOn(ctx context.Context, s *session, exchange, key string, message amqp.Publishing) error {
