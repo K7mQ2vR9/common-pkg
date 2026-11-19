@@ -34,7 +34,7 @@
 | 9 | 统一响应和特殊错误匹配 | 已修改、验证并确认，包含跨 RPC Trace ID |
 | 10 | 多语言转换和 JSON 序列化兼容 | 已恢复自动匹配、验证并确认 |
 | 11 | 请求头校验、CORS 和并发上限 | 已完成确认范围内的 CORS 和并发上限调整 |
-| 12 | 数据库连接错误、Redis 客户端类型和日志关闭 | MySQL 和 Redis 已完成并验证，日志关闭待处理 |
+| 12 | 数据库连接错误、Redis 客户端类型和日志关闭 | MySQL、Redis 和日志关闭均已完成并验证，待确认 |
 | 13 | AES-GCM nonce、密钥校验和加密失败处理 | 待处理 |
 | 14 | gRPC 客户端成功分支、服务端认证和状态码 | 待处理 |
 | 15 | RabbitMQ 队列绑定、重连和重新订阅 | 待处理 |
@@ -251,3 +251,32 @@ SelectDb:
       SlowThreshold: 200ms
       ParameterizedQueries: true
 ```
+
+### 2026-11-19 / DEV-20261119-003 / 第 12 项日志关闭
+
+- **用户确认** 修复日志关闭时直接退出进程的问题，验证重复关闭和后续资源清理。
+- **改动** LogrusWriter.Close() 正常返回。Logrus 同步写日志，输出及 Hook 的生命周期由配置它们的调用方管理。补充中文注释，说明重复和并发调用的语义。
+- **验证** 使用临时 overlay 执行 `go test -mod=readonly -buildvcs=false -overlay <临时配置> -run '^Test(LogrusWriterClose|LoggingShutdownContinuesCleanup)$' -count=1 -v ./common-pkg/logs`，两组通过。覆盖重复关闭、16 个并发关闭、已写日志保留、调用方输出资源的生命周期。子进程使用默认退出函数和实际 go-zero 的 logx.Close()，确认正常关闭后仍执行后续代码和 defer 清理。执行 `go build -mod=readonly -buildvcs=false ./common-pkg/logs` 和 Git 差异检查，通过。
+- **验证范围** 本轮针对日志包构建和定向测试，使用子进程模拟服务退出收尾。部署环境的完整服务退出流程待联调。
+- **测试清理** 登记验证结果后已删除本次临时测试用例、overlay 配置和构建缓存。核对临时目录已移除，项目原有五个测试文件保留。
+
+### 2026-11-19 / DEV-20261119-004 / 第 12 项复查与补充修复
+
+- **用户要求** 重新检查并处理第 12 项。本轮核查 MySQL 配置和请求上下文、Redis 启动取消与清理、日志记录与关闭流程。
+- **日志问题与修复** Close() 正常返回的行为通过复核。另发现 Severe() 使用 Logrus.Fatal()，与 go-zero Severe() 的记录行为不一致。修复为使用 FatalLevel 记录并正常返回，使调用方能继续收尾。补充关闭与严重日志的中文注释。
+- **Redis 问题与修复** go-redis 的网络读取 deadline 继承了上下文截止时间，但初始化过程中主动取消上下文时，正在进行的读取仍会等待原 I/O 超时。先用临时用例复现取消后仍阻塞的情况，再增加仅在初始化期间生效的 context.AfterFunc 回调，以关闭客户端中断读取。初始化完成即撤销回调，成功的客户端由调用方管理。补充 Redis 配置字段注释。
+- **MySQL 核查** YAML 与 Go 直接传参的默认值一致，显式零值与 false 正确保留，结构化超时覆盖 DSN，业务会话绑定请求上下文。查询上下文独立于基础连接池，重复关闭连接池正常返回。
+- **定向验证** 临时 overlay 执行日志包的 TestRecheckSevereReturns、TestRecheckCloseAndExtensions、TestRecheckShutdownSubprocess，以及数据库包的 TestRecheckMySQLConfiguration、TestRecheckMySQLRequestContext。子进程验证严重日志后仍能执行正常关闭和 defer。现有的格式化日志、结构化日志和凭证字段过滤通过回归。日志包另以 go test -race 通过。
+- **Redis 验证** 编译带 overlay 的 dbM 测试二进制并在本机回环协议端运行 TestRecheckRedisStartupCancellation 和 TestRecheckRedisSuccessfulStartup。覆盖单机与集群初始化取消、连接关闭、成功后取消原启动上下文仍可继续使用客户端，并通过 -race 检测。修复前 Severe() 退出和 Redis 取消阻塞均被用例捕获，修复后通过。
+- **执行命令** 以下命令使用本次临时 overlay 和测试二进制。
+
+```text
+go test -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestRecheck(SevereReturns|CloseAndExtensions|ShutdownSubprocess)$' -count=1 -v ./common-pkg/logs
+go test -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestRecheckMySQL(Configuration|RequestContext)$' -count=1 -v ./common-pkg/dbM
+go test -race -mod=readonly -buildvcs=false -overlay <临时配置> -run '^TestRecheck(SevereReturns|CloseAndExtensions|ShutdownSubprocess)$' -count=1 ./common-pkg/logs
+go test -c -race -mod=readonly -buildvcs=false -overlay <临时配置> -o <临时二进制> ./common-pkg/dbM
+<临时二进制> -test.run '^TestRecheckRedis(StartupCancellation|SuccessfulStartup)$' -test.v -test.timeout=15s
+```
+
+- **构建与限制** go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...、go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1 和 Git 差异检查通过。现有测试做全量编译。本轮数据库请求上下文检查使用 GORM 会话，Redis 使用本地协议端，生产数据库、多节点集群切换和完整部署退出流程待联调。
+- **测试清理** 登记验证后已删除临时用例、overlay、测试二进制、日志、下载文件和 Go 缓存。核对临时目录及三份 overlay 目标文件均不存在，原有五个测试文件保留。

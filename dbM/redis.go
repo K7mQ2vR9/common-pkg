@@ -15,19 +15,28 @@ import (
 
 const redisStartupTimeout = 5 * time.Second
 
+// RedisConfig 配置 Redis 的部署模式、地址、认证和 TLS。
 type RedisConfig struct {
-	Type               string   `json:",default=node,options=node|cluster"`
-	Addr               string   `json:",optional"`
-	Addrs              []string `json:",optional"`
-	Username           string   `json:",optional"`
-	Password           string   `json:",optional"`
-	DB                 int      `json:",optional"`
-	TLS                bool     `json:",optional"`
-	InsecureSkipVerify bool     `json:",optional"`
+	// Type 默认 node，可选 cluster；Go 直接传参时空值也使用 node。
+	Type string `json:",default=node,options=node|cluster"`
+	// Addr 为 node 模式的必填地址，格式为 host:port。
+	Addr string `json:",optional"`
+	// Addrs 为 cluster 模式的种子地址列表，至少填写一个 host:port。
+	Addrs []string `json:",optional"`
+	// Username 为 ACL 用户名，默认空值，由服务端认证方式决定是否填写。
+	Username string `json:",optional"`
+	// Password 为认证密码，默认空值。
+	Password string `json:",optional"`
+	// DB 默认 0，node 模式允许非负值，cluster 模式使用 0。
+	DB int `json:",optional"`
+	// TLS 默认 false，开启后使用 TLS 并默认校验证书。
+	TLS bool `json:",optional"`
+	// InsecureSkipVerify 默认 false，仅在启用 TLS 时允许显式跳过证书校验。
+	InsecureSkipVerify bool `json:",optional"`
 }
 
-// NewRedisClient connects to the configured server and checks it with PING.
-// The caller owns the returned client and closes it at shutdown.
+// NewRedisClient 按部署模式创建客户端，启动 PING 最多等待 5 秒并继承调用方上下文。
+// 启动失败或取消时关闭客户端，成功后由调用方在服务退出时调用 Close。
 func NewRedisClient(ctx context.Context, config RedisConfig) (redis.UniversalClient, error) {
 	if ctx == nil {
 		return nil, errors.New("redis startup context is required")
@@ -62,7 +71,7 @@ func NewRedisClient(ctx context.Context, config RedisConfig) (redis.UniversalCli
 			MinVersion:         tls.VersionTLS12,
 			InsecureSkipVerify: config.InsecureSkipVerify,
 		}
-		// The default TLS dialer in go-redis v9.7.0 does not use the caller context.
+		// 使用支持上下文取消的 TLS 拨号器，覆盖连接及握手过程。
 		dialer := &tls.Dialer{
 			NetDialer: &net.Dialer{Timeout: redisStartupTimeout},
 			Config:    options.TLSConfig,
@@ -77,7 +86,13 @@ func NewRedisClient(ctx context.Context, config RedisConfig) (redis.UniversalCli
 		client = redis.NewClient(options.Simple())
 	}
 
+	// go-redis 的 I/O deadline 不会因 ctx 提前取消而立即更新。
+	// 启动取消时关闭连接中断读取，PING 完成后撤销回调，交给调用方管理客户端。
+	stopClose := context.AfterFunc(ctx, func() {
+		_ = client.Close()
+	})
 	pingErr := client.Ping(ctx).Err()
+	stopClose()
 	if err := ctx.Err(); err != nil {
 		pingErr = err
 	}
