@@ -40,7 +40,7 @@
 | 13 | AES-GCM nonce、密钥校验和加密失败处理 | 已完成、验证并确认，使用进程级配置开关 |
 | 14 | gRPC 客户端成功分支、服务端认证和状态码 | 已完成、验证并确认 |
 | 15 | RabbitMQ 队列绑定、重连和重新订阅 | 已实现重试、TG 通知、统一链路、处理超时、业务消息接口、消费错误分类和终态双份确认，已验证；后续完善逐项确认 |
-| 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | Elasticsearch 7 已完成并确认；OpenSearch 独立实现已开发并验证，待确认；XXL-JOB 待处理 |
+| 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | Elasticsearch 7、OpenSearch 已完成并确认；XXL-JOB 生命周期已开发并验证，待确认 |
 | 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | 待处理 |
 
 ## 开发记录
@@ -601,3 +601,33 @@ git diff --check
 
 - **限制** 使用真实本地 HTTP/TLS 和当前 SDK 验证协议行为，故障正文和 EOF 使用测试替身；未连接真实 OpenSearch 集群或执行原有集成测试业务逻辑。初始化探活不替代实际集群/索引权限及版本联调；SDK 高级调用须自行提供上下文预算并释放正文，JSON 同步计算不可强制中断，准确总数和 refresh=true 有额外成本，写入结果不确定与幂等由接入方处理。当前 SDK 节点发现等高级功能保留，未新增其真实集群联调。
 - **测试清理** 清理前已登记实际命令、结果、首次测试预期错误和限制；随后删除本次两份临时 overlay 测试、配置、全部测试输出、CA 文件、依赖清单、快照、三份抽取范例及编译产物和独立构建缓存。已核对任务临时目录与两处仓库 overlay 目标均不存在，原有五个测试全部保留，原 OpenSearch 测试仅按新接口同步；按删除前快照对照确认本轮未改 ES7/XXL-JOB 文件。API/RPC 仅更新文档，无新增测试或临时产物。
+
+
+### 2026-11-20 / DEV-20261120-002 / XXL-JOB 监听、心跳及任务关闭生命周期
+
+- **用户确认** 接管当前 SDK 无法完整关闭的 HTTP 服务、注册心跳和任务上下文，增加 Start(ctx)/Stop(ctx) 错误返回、明确启动结果、关闭预算及任务注册校验，更新范例和说明。用户随后明确回复“沿用现有协议”，确认现有 /run 与数组回调协议，无需修改当前实现。协议结构以官方 2.4.1 为验证基准，未将该基准视为用户指定的部署版本，实际版本待联调。
+- **配置与 API** NewClient(Config) 返回 (*Client,error)，不监听或注册；配置 AdminAddress/AccessToken/RegistryKey/ExecutorAddress 必填，ListenAddress 缺省 :9999。RequestTimeout 默认 5s、RegistryInterval 20s、ShutdownTimeout 10s，HTTP 请求体上限 MaxBodyBytes 默认 1MiB，已接受未完成任务总数 MaxTasks 默认 1024；零值采用默认、负值及非法地址/端口拒绝，注册地址不得为未指定 IP。新增和修改的配置、公开接口和关键路径补齐中文注释。
+- **启动与关闭** Start 使用服务生命周期 ctx，先监听再完成首次注册，监听或注册失败返回阶段错误并完成有界清理；异步 Serve 错误通过 Wait 返回，不退出进程。Stop 立即拒绝新任务、关闭监听并取消任务，等首次注册和心跳本地请求退出后再摘除，防止后台再次周期注册；ShutdownTimeout 覆盖 HTTP 收尾、摘除、任务和回调等待，超限强制关闭 HTTP/取消回调后返回超时。未启动、重复或并发 Stop 均安全。调用方 Stop/Wait 的 ctx 只中止等待，不放弃后台有界清理；父 Start ctx 取消自动触发关闭。一实例只能启动一次，关闭后须重新创建。
+- **任务注册与调度** Register 改为 error 返回且批量原子提交，拒绝 nil/typed nil、空名、重复名、nil 函数和启动后追加；可选 SetLogHandler 仅启动前设置。保留现有 HandlerFun 的 string 结果签名，普通返回按成功，超时、取消、panic 按失败。每次调度独立快照避免 SDK 复用任务对象的数据竞争；同 JobID 串行 FIFO、DISCARD_LATER 拒绝忙碌任务、COVER_EARLY 取消旧任务及排队任务并等待旧处理器退出后执行最新任务，不强制并发启动不能终止的 Go 代码。kill 幂等，未退出任务仍忙碌。受控排队与回调计入统一容量，活跃 LogID 仅对相同请求去重，不提供持久化去重。
+- **上下文与回调** 调度入口沿用合法 HTTP Request/Trace ID，缺省按平台规则生成独立 Trace；不继承启动请求的 ID 或 /run 响应后的取消。ExecutorTimeout 按秒从实际处理开始计时，为 0 不加执行时限，所有任务仍响应服务关闭。业务修改参数不会影响原 LogID/LogDateTime 回调；业务退出后回调沿用原 Trace，通过独立网络和关闭预算上报取消失败。回调不阻塞业务串行队列，结果摘要最多 1024 字节并规范无效 UTF-8；本轮保持单次回调，失败记录日志，不增加自动重试或持久化队列。
+- **协议与日志** 五个执行器端点均要求单一正确令牌、POST 和有界 JSON 正文，拒绝重复令牌、未知 handler/策略、非法参数及非 BEAN 脚本任务。管理请求使用独立连接池、有界正文读取和 RequestTimeout，拒绝重定向，不打印令牌、完整参数或调度中心原始正文。/log 支持带 ctx 的日志提供器，默认明确提示使用应用日志系统，不伪造历史日志。删除 SDK Init/Run/Stop、MustStart、旧构造/链式注册及无参 Stop、旧 Logger 适配器和 demo.Old，依赖仅复用协议 DTO。
+- **说明与示例** 新建 [XXL-JOB 使用说明](xxlJob/README.md)，说明配置、API 签名、Start ctx 的整个生命周期含义、Stop 等待取消、任务策略、链路及回调限制，并提供完整程序、主动关闭及日志提供器三段 Go 范例；demo/main.go 改为环境变量、应用退出信号、Start/Wait 和 ctx 业务示例，不运行外部执行器或无限等待。
+- **定向验证** 16 组本机 HTTP/协议/生命周期测试及 -race 通过，另 1 组 UTF-8/JSON 边界 -race 通过，共 17 组。覆盖配置缺省/非法值和注册原子性；Stop-before-Start、端口冲突不注册、注册失败释放端口、首次注册时并发 Stop 无死锁；多次/并发 Stop 仅摘除一次、停止后无心跳、监听端口可重新绑定；父 ctx 自动停止、Wait 取消不停止服务；非法/重复令牌、HTTP 方法/路径、超大/null 请求、未知任务/脚本和非法 Trace；任务快照、并行独立 JobID 与 Trace、串行/丢弃/覆盖/重复活跃调度；kill 及 Stop 对排队任务失败回调；实际调度超时及 panic 脱敏；不响应 ctx 的任务关闭超时和晚退出不再发送回调；调用方 Stop 截止后后台继续清理；摘除超时及异步监听错误可观察；日志提供器、总容量、回调失败不阻塞后续业务、1024 字节 UTF-8 和额外 JSON 拒绝。
+- **执行记录与排障** 初次包构建缺少 time 导入、临时测试混用有名/无名参数导致编译失败，均修正后验证通过。第一次本地端口测试的自动权限审核未在期限内完成，工具允许重试；先以沙箱内编译检查验证脚本，再按提示重试获准，16 组本地测试通过。最后规范无效 UTF-8 摘要，并以额外无监听边界用例验证。三段 README 范例抽取编译、全量构建和原有测试编译通过，格式、diff 和本地文档链接检查通过；按开始时 SHA-256 快照确认搜索和 AMQP 源码未被本轮修改。
+- **实际命令** 在平台根目录使用独立 GOCACHE=/private/tmp/new-platform-xxljob.tQv5N685/cache 和 GOPROXY=off，无下载或新增依赖。临时测试、overlay、输出、源码快照、抽取范例与产物均在同一临时目录。
+
+```text
+go build -mod=readonly -buildvcs=false ./common-pkg/xxlJob/...
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-xxljob.tQv5N685/overlay.json -run '^$' ./common-pkg/xxlJob
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-xxljob.tQv5N685/overlay.json -run '^TestXXL' -count=1 -v ./common-pkg/xxlJob -timeout=45s
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-xxljob.tQv5N685/overlay.json -run '^TestXXLHelperBoundaries$' -count=1 -v ./common-pkg/xxlJob
+go build -mod=readonly -buildvcs=false -o <临时目录>/example_N <临时目录>/example_N.go  （N=1..3，逐一执行）
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/xxlJob/*.go common-pkg/xxlJob/demo/main.go
+git -C common-pkg diff --check
+git diff --check
+```
+
+- **限制** 使用真实本机 HTTP 监听和本地调度中心替身，未连接实际调度中心或发送外部回调；版本和部署地址仍须联调，未运行原有外部服务集成测试。Go 无法强制终止忽略取消的任务/日志提供器，关闭预算耗尽后业务须自行退出；队列和回调是内存状态，进程崩溃或关闭预算耗尽不保证回调送达；正常 string 返回没有业务 error 结果通道，业务须明确现有签名语义并自行幂等。注册响应取消后的远端瞬间状态不保证，摘除失败通过错误返回并依靠调度中心过期判定或管理处理。
+- **测试清理** 清理前已登记实际命令、结果、初次编译/审核问题及限制；随后删除本次临时测试、overlay、全部输出、快照、三份范例源码及编译产物和独立构建缓存。核对任务临时目录与仓库 overlay 目标均不存在，原有五个测试全部保留；删除前摘要对照确认搜索和 AMQP 未被本轮修改。API/RPC 只更新文档，无新增测试或临时产物。

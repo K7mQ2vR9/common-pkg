@@ -2,70 +2,56 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"github.com/K7mQ2vR9/base-pkg/xxlJob"
-	"github.com/xxl-job/xxl-job-executor-go"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/xxl-job/xxl-job-executor-go/example/task"
+	"github.com/K7mQ2vR9/base-pkg/headInfo"
+	"github.com/K7mQ2vR9/base-pkg/xxlJob"
+	xxl "github.com/xxl-job/xxl-job-executor-go"
 )
 
 func main() {
-	address, accessToken := schedulerConnection()
-	client := xxlJob.NewClient(context.Background(), xxlJob.Config{
-		Address:      address,
-		AccessToken:  accessToken,
-		ExecutorPort: "9999",
-		RegistryKey:  "golang-jobs",
-	}).Register(
-		&TestHandler{},
-	)
-	client.MustStart()
-
-	select {}
-}
-
-// schedulerConnection 从运行环境读取示例服务的连接地址和凭证。
-func schedulerConnection() (address, accessToken string) {
-	address = os.Getenv("XXL_JOB_ADDRESS")
-	accessToken = os.Getenv("XXL_JOB_ACCESS_TOKEN")
-	if address == "" || accessToken == "" {
-		log.Fatal("XXL_JOB_ADDRESS and XXL_JOB_ACCESS_TOKEN must be set")
+	appCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	client, err := xxlJob.NewClient(xxlJob.Config{
+		AdminAddress:    os.Getenv("XXL_JOB_ADMIN_ADDRESS"),
+		AccessToken:     os.Getenv("XXL_JOB_ACCESS_TOKEN"),
+		ExecutorAddress: os.Getenv("XXL_JOB_EXECUTOR_ADDRESS"),
+		ListenAddress:   os.Getenv("XXL_JOB_LISTEN_ADDRESS"),
+		RegistryKey:     "platform-jobs",
+	})
+	if err != nil {
+		log.Printf("initialize executor: %v", err)
+		return
 	}
-	return address, accessToken
-}
-
-type TestHandler struct {
-}
-
-func (h TestHandler) Handler() xxlJob.HandlerFun {
-	return func(cxt context.Context, param *xxl.RunReq) string {
-		fmt.Println("test one task" + param.ExecutorHandler + " param：" + param.ExecutorParams + " log_id:" + xxl.Int64ToStr(param.LogID))
-		return "test finish..."
+	if err := client.Register(TestHandler{}); err != nil {
+		log.Printf("register task: %v", err)
+		return
+	}
+	if err := client.Start(appCtx); err != nil {
+		log.Printf("start executor: %v", err)
+		return
+	}
+	// Start 后返回，监听错误或退出信号都会触发有界关闭；不再由 SDK 接管进程信号。
+	if err := client.Wait(context.Background()); err != nil {
+		log.Printf("executor stopped: %v", err)
 	}
 }
 
-func (h TestHandler) Pattern() string {
-	return "task.test"
-}
+type TestHandler struct{}
 
-func Old() {
-	address, accessToken := schedulerConnection()
-	exec := xxl.NewExecutor(
-		xxl.ServerAddr(address),
-		xxl.AccessToken(accessToken),
-		// xxl.ExecutorIp("127.0.0.1"),      // 可自动获取
-		xxl.ExecutorPort("9999"),       // 默认9999（非必填）
-		xxl.RegistryKey("golang-jobs"), // 执行器名称
-		// xxl.SetLogger(&logger{}),       // 自定义日志
-	)
-	exec.Init()
-	// 设置日志查看handler
-	// exec.LogHandler(customLogHandle)
-	// 注册任务handler
-	exec.RegTask("task.test", task.Test)
-	exec.RegTask("task.test2", task.Test2)
-	exec.RegTask("task.panic", task.Panic)
-	log.Fatal(exec.Run())
+func (TestHandler) Pattern() string { return "task.test" }
+func (TestHandler) Handler() xxlJob.HandlerFun {
+	return func(ctx context.Context, param *xxl.RunReq) string {
+		select {
+		case <-ctx.Done():
+			return "canceled"
+		default:
+		}
+		// 实际数据库、RPC 和 MQ 操作均使用 ctx；不要输出未经处理的 ExecutorParams 或令牌。
+		log.Printf("job=%d log=%d trace=%s", param.JobID, param.LogID, headInfo.GetTrace(ctx))
+		return "finished"
+	}
 }
