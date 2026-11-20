@@ -41,7 +41,7 @@
 | 14 | gRPC 客户端成功分支、服务端认证和状态码 | 已完成、验证并确认 |
 | 15 | RabbitMQ 队列绑定、重连和重新订阅 | 已实现重试、TG 通知、统一链路、处理超时、业务消息接口、消费错误分类和终态双份确认，已验证；后续完善逐项确认 |
 | 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | Elasticsearch 7、OpenSearch、XXL-JOB 已完成并确认 |
-| 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | HTTP 请求已开发并验证，待确认；随机字符串、TOTP URI 和 Redis 分片工具待处理 |
+| 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | HTTP 请求已完成并确认；随机字符串已开发并验证，待确认；TOTP URI 和 Redis 分片工具待处理 |
 
 ## 开发记录
 
@@ -659,3 +659,27 @@ rg -n 'GetRequest\(|PostRequest\(' common-pkg --glob '*.go'  （无匹配，退�
 
 - **结果与限制** 20 组定向测试及竞态检测、三段范例编译、全量构建及原有测试编译通过。仅使用本机 HTTP/TLS 和故障替身，未调用外部业务接口，未执行原有外部集成测试逻辑。同步 JSON 编码无法强制中断，Close 不强制结束在途请求；实际目标接口认证、响应契约和部署网络由接入业务联调。API/RPC 本轮仅更新接入约定，无业务代码或测试产物。
 - **测试清理** 清理前已登记实际命令、结果、排障和限制；随后删除本次临时测试、overlay、全部测试输出、源码快照、三份范例源码及编译产物和独立构建缓存。核对任务临时目录及仓库 overlay 目标均不存在，原有五个测试全部保留；AMQP、搜索、XXL-JOB 及其余三类工具的摘要对照通过。API/RPC 仅更新文档，无新增测试或临时产物。
+
+
+### 2026-11-20 / DEV-20261120-004 / 加密安全随机字符串
+
+- **用户确认** 第 17 项依次处理，HTTP 已确认；本轮只调整 GenerateRandomString，不改 TOTP、Redis 分片或统一 Trace ID 生成规则。长度 1～4096、固定 A-Z/a-z/0-9、使用加密安全随机源、拒绝采样及错误返回均已在开发前确认。
+- **实现** 删除 tool.go 原 math/rand、逐次 rand.Seed 和无错误返回实现；新增 random_string.go，公开签名为 GenerateRandomString(length int) (string, error)，无旧签名包装。使用 crypto/rand.Reader，局部 128 字节缓冲按剩余长度批量 io.ReadFull；只接受 0～247，每个字符对应四个字节值，拒绝 248～255，避免取模偏差。非法长度在读取或分配结果前拒绝，包含极端 int 值；读取失败返回空字符串并用 %w 保留错误链，已生成前缀不返回。无全局播种、缓存或可变源设置，支持并发调用，字段范围和关键逻辑补齐中文备注。
+- **接入与说明** 当前仓库 Go 源码无业务调用方，无需业务迁移；新建 [随机字符串使用说明](commonTool/RANDOM_STRING.md)，包含完整错误处理范例、长度/字符集、均匀映射、签名变化与用途边界。生成值不保证唯一，业务按需提供唯一约束、有效期或其他消费控制；本函数不替代专用 Trace ID/TOTP。API/RPC 本轮仅更新接入记录。
+- **验证结果** 6 组 TestRandomString 及 -race 全部通过：非法长度（负数、0、4097、最大/最小 int）拒绝且不读源；公开接口 1/2/32/61/62/127/128/129/255/256/4095/4096 长度和字符集；确定性输入全部 256 个字节，先拒绝八个高值，再验证四轮完整字符集、每字符恰好四次且源耗尽；连续两批拒绝值、逐字节短读和跨批补足；读源即时/部分/已生成前缀后的故障、EOF/UnexpectedEOF 的 errors.Is 及不返回前缀；64 个 goroutine 各 16 次共 1024 次调用的长度/字符集与竞态检查。不以概率性的“所有结果不重复”判断正确性。
+- **构建与范围核对** 一段文档 Go 范例抽取编译通过；全量构建、原有五个测试的编译（不执行用例）、gofmt、diff 检查通过。按开始时 SHA-256 快照核对除本轮 tool.go 和开发记录外的原有公共包文件未变，HTTP、AMQP、搜索、XXL-JOB、TOTP、Redis 分片和原有测试全部保留。定向测试使用临时 overlay，不在仓库新增测试文件，无下载或新依赖。
+- **实际执行命令** 在平台根目录执行，独立 GOCACHE=/private/tmp/new-platform-random.gmftllno/cache、GOPROXY=off。临时测试/overlay、结果输出、源码快照、范例源码/二进制及构建缓存均在同一任务目录。
+
+```text
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-random.gmftllno/overlay.json -run '^TestRandomString' -count=1 -v ./common-pkg/commonTool -timeout=45s
+go build -mod=readonly -buildvcs=false -o /private/tmp/new-platform-random.gmftllno/example /private/tmp/new-platform-random.gmftllno/example.go
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/commonTool/tool.go common-pkg/commonTool/random_string.go
+git -C common-pkg diff --check
+git diff --check
+rg -n 'GenerateRandomString|rand.Seed' common-pkg --glob '*.go'
+```
+
+- **已知限制** 故障源经内部读取函数注入，未替换全局 crypto/rand.Reader 或人为破坏系统熵源；真实公开接口使用本机系统随机源验证。部分 Go 版本的系统熵源发生底层致命故障会终止进程，本工具只传播以 error 返回的失败，不捕获运行时致命退出；当前工具链为 go1.26.5，模块基线 go1.22，未另装旧工具链运行。定向测试验证字符映射和拒绝逻辑，不构成对操作系统随机性的统计认证；原有外部服务集成测试只编译，未连接外部服务。
+- **测试清理** 已在清理前登记实际命令、结果和限制，随后删除本次临时测试、overlay、测试输出、源码快照、文档范例源码/二进制及独立构建缓存。核对任务临时目录和仓库 overlay 目标均不存在，原有五个测试全部保留；无关原有文件 SHA-256 摘要一致，公共包新增文件仅为随机工具源码及使用说明。API/RPC 仅更新文档，无新增测试或临时产物。

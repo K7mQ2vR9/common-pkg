@@ -5,22 +5,11 @@ import (
 	"crypto"
 	"encoding/hex"
 	"fmt"
-	uuid "github.com/satori/go.uuid"
+	"time"
+
 	"github.com/shopspring/decimal"
 	"github.com/spf13/cast"
-	"math/rand"
-	"time"
 )
-
-func GenerateRandomString(length int) string {
-	rand.Seed(time.Now().UnixNano())
-	charset := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-	randomString := make([]byte, length)
-	for i := 0; i < length; i++ {
-		randomString[i] = charset[rand.Intn(len(charset))]
-	}
-	return string(randomString)
-}
 
 func TimeToString(timeInt int64) string {
 	if timeInt == 0 {
@@ -67,11 +56,6 @@ func GetLastMonthZeroTimeInt() int64 {
 
 	startOfYesterday := time.Date(lastMonth.Year(), lastMonth.Month(), 1, 0, 0, 0, 0, time.UTC)
 	return startOfYesterday.Unix()
-}
-
-func GenUUID() uuid.UUID {
-	v1 := uuid.NewV1()
-	return v1
 }
 
 func Md5(str string) string {
