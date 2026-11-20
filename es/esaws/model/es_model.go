@@ -5,266 +5,256 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
+
 	"github.com/K7mQ2vR9/base-pkg/commonTool"
 	"github.com/K7mQ2vR9/base-pkg/es/esaws"
 	"github.com/K7mQ2vR9/base-pkg/es/esaws/core"
-	"github.com/elastic/go-elasticsearch/v7/esapi"
-	"github.com/elastic/go-elasticsearch/v8/typedapi/types"
-	"io"
-	"strings"
+	"github.com/opensearch-project/opensearch-go/opensearchapi"
 )
 
+// EsModel 将当前请求上下文与共享 OpenSearch 客户端组合；每个请求创建自己的模型实例。
 type EsModel struct {
-	Ctx          context.Context
-	Db           *core.Es
+	// Ctx 为当前请求上下文，所有操作继承其取消、截止时间和链路。
+	Ctx context.Context
+	// Db 为服务级共享客户端，模型不负责关闭它。
+	Db *core.Es
+	// BusinessCode 非空时在模型索引名后追加下划线和业务码；不会自动创建该索引。
 	BusinessCode string
 }
 
-func NewEsModel(ctx context.Context, Db *core.Es, businessCode string) *EsModel {
-	return &EsModel{
-		Ctx:          ctx,
-		Db:           Db,
-		BusinessCode: businessCode,
-	}
+// NewEsModel 创建请求级模型，不建立连接；nil 上下文或客户端在执行操作时返回错误。
+func NewEsModel(ctx context.Context, db *core.Es, businessCode string) *EsModel {
+	return &EsModel{Ctx: ctx, Db: db, BusinessCode: businessCode}
 }
 
-func (model *EsModel) GetDb() *core.Es {
-	if model.Db != nil {
-		return model.Db
+// GetDb 返回共享客户端，nil 模型或未设置客户端时返回 nil。
+func (m *EsModel) GetDb() *core.Es {
+	if m == nil {
+		return nil
 	}
-
-	return nil
+	return m.Db
 }
 
-func (model *EsModel) IndexAuto(index string) error {
-	create, err := model.GetDb().Indices.Create(index)
-	if err != nil {
-		return err
+func (m *EsModel) begin() (context.Context, context.CancelFunc, error) {
+	if m == nil || m.Db == nil {
+		return nil, nil, errors.New("opensearch model client is required")
 	}
-	if create.IsError() {
-		return errors.New(create.String())
-	}
-
-	return nil
+	return m.Db.OperationContext(m.Ctx)
 }
 
-func (model *EsModel) InsertSchema(data interface{}) error {
-	dataJson, err := json.Marshal(data)
-	if err != nil {
-		return err
+func missing(value any) bool {
+	if value == nil {
+		return true
 	}
-
-	var (
-		indexName string
-		idKey     string
-	)
-
-	if str, ok := data.(esv7.IndexTable); ok {
-		if model.BusinessCode == "" {
-			indexName = str.IndexName()
-		} else {
-			indexName = str.IndexName() + "_" + model.BusinessCode
-		}
-
+	v := reflect.ValueOf(value)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface, reflect.Func, reflect.Chan:
+		return v.IsNil()
 	}
-	if str, ok := data.(esv7.Schema); ok {
-		idKey = str.GetId()
-		if idKey == "" {
-			idKey = commonTool.GenUUID().String()
-		}
-	}
-
-	if indexName == "" || idKey == "" {
-		return errors.New("Not IndexTable. ")
-	}
-
-	response, err := model.GetDb().Create(indexName, idKey, bytes.NewBuffer(dataJson))
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	io.Copy(io.Discard, response.Body)
-
-	if response.IsError() {
-		return errors.New(response.String())
-	}
-
-	return nil
+	return false
 }
 
-func (model *EsModel) FindOne(id string, res interface{}) error {
-	var (
-		indexName string
-	)
-
-	if str, ok := res.(esv7.IndexTable); ok {
-		if model.BusinessCode == "" {
-			indexName = str.IndexName()
-		} else {
-			indexName = str.IndexName() + "_" + model.BusinessCode
-		}
+func (m *EsModel) indexName(value any) (string, error) {
+	if missing(value) {
+		return "", errors.New("opensearch index target is required")
 	}
-
-	resEs, err := model.GetDb().Get(indexName, id)
-	if err != nil {
-		return err
+	table, ok := value.(esaws.IndexTable)
+	if !ok || table.IndexName() == "" {
+		return "", errors.New("opensearch non-empty IndexTable is required")
 	}
-
-	err = core.ParseGetResponse(model.Ctx, &res, (*esapi.Response)(resEs))
-	if err != nil {
-		return err
+	name := table.IndexName()
+	if m.BusinessCode != "" {
+		name += "_" + m.BusinessCode
 	}
-
-	return nil
-}
-func (model *EsModel) Delete(id string, res interface{}) error {
-	var (
-		indexName string
-	)
-	if str, ok := res.(esv7.IndexTable); ok {
-		if model.BusinessCode == "" {
-			indexName = str.IndexName()
-		} else {
-			indexName = str.IndexName() + "_" + model.BusinessCode
-		}
-	}
-
-	resEs, err := model.GetDb().Delete(indexName, id)
-	if err != nil {
-		return err
-	}
-	defer resEs.Body.Close()
-	io.Copy(io.Discard, resEs.Body)
-
-	if resEs.IsError() {
-		return errors.New(resEs.String())
-	}
-
-	return nil
+	return name, nil
 }
 
-func (model *EsModel) UpdateSchema(data interface{}) error {
-	dataJson, err := json.Marshal(data)
-	if err != nil {
-		return err
+func documentID(value any, generate bool) (string, error) {
+	if missing(value) {
+		return "", errors.New("opensearch document is required")
 	}
-
-	dataJson = []byte("{\"doc\":" + string(dataJson) + "}")
-	var (
-		indexName string
-		idKey     string
-	)
-
-	if str, ok := data.(esv7.IndexTable); ok {
-		if model.BusinessCode == "" {
-			indexName = str.IndexName()
-		} else {
-			indexName = str.IndexName() + "_" + model.BusinessCode
-		}
+	schema, ok := value.(esaws.Schema)
+	if !ok {
+		return "", errors.New("opensearch Schema is required")
 	}
-	if str, ok := data.(esv7.Schema); ok {
-		idKey = str.GetId()
+	id := schema.GetId()
+	if id == "" && generate {
+		id = commonTool.GenUUID().String()
 	}
-
-	if indexName == "" || idKey == "" {
-		return errors.New("Not IndexTable or Schema. ")
+	if id == "" {
+		return "", errors.New("opensearch document ID is required")
 	}
-
-	response, err := model.GetDb().Update(indexName, idKey, bytes.NewBuffer(dataJson))
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	io.Copy(io.Discard, response.Body)
-
-	if response.IsError() {
-		return errors.New(response.String())
-	}
-
-	return nil
+	return id, nil
 }
 
-func (model *EsModel) Search(res interface{}, res2 interface{}, query map[string]interface{}) (es *esapi.Response, num int64, aggregate map[string]types.Aggregate, err error) {
-	var (
-		indexName string
-	)
-
-	if str, ok := res.(esv7.IndexTable); ok {
-		if model.BusinessCode == "" {
-			indexName = str.IndexName()
-		} else {
-			indexName = str.IndexName() + "_" + model.BusinessCode
-		}
+// closeOnError 清理 SDK 同时返回响应和错误时的正文；正常响应由 core 解析函数接管。
+func closeOnError(response *opensearchapi.Response, err error) error {
+	if err != nil && response != nil && response.Body != nil {
+		_ = response.Body.Close()
 	}
-
-	querydata, err := json.Marshal(query)
-	if err != nil {
-		return nil, 0, nil, err
-	}
-	resEs, err := model.GetDb().Search(
-		model.GetDb().Search.WithPretty(),
-		model.GetDb().Search.WithIndex(indexName),
-		model.GetDb().Search.WithBody(strings.NewReader(string(querydata))),
-	)
-	if err != nil {
-		return nil, 0, nil, err
-	}
-
-	total, aggregate, err := core.ParseSearchResponse(context.Background(), res2, (*esapi.Response)(resEs))
-	if err != nil {
-		return nil, 0, nil, err
-	}
-
-	return (*esapi.Response)(resEs), total, aggregate, err
+	return err
 }
 
-// 会强制覆盖所有的字段,如果不存在则会插入新数据
-func (model *EsModel) IndexSchema(data interface{}) error {
-	dataJson, err := json.Marshal(data)
+// IndexAuto 创建索引，已有同名索引按服务端错误返回，不自动删除或重建。
+// index 是完整索引名称，本方法不会自动追加 BusinessCode 后缀。
+func (m *EsModel) IndexAuto(index string) error {
+	ctx, cancel, err := m.begin()
 	if err != nil {
 		return err
 	}
-
-	var (
-		indexName string
-		idKey     string
-	)
-
-	if str, ok := data.(esv7.IndexTable); ok {
-		if model.BusinessCode == "" {
-			indexName = str.IndexName()
-		} else {
-			indexName = str.IndexName() + "_" + model.BusinessCode
-		}
+	defer cancel()
+	if index == "" {
+		return errors.New("opensearch index is required")
 	}
-	if str, ok := data.(esv7.Schema); ok {
-		idKey = str.GetId()
+	response, err := m.Db.Indices.Create(index, m.Db.Indices.Create.WithContext(ctx))
+	if err = closeOnError(response, err); err != nil {
+		return err
 	}
+	return core.CheckResponse(ctx, response)
+}
 
-	if indexName == "" || idKey == "" {
-		return errors.New("Not IndexTable or Schema. ")
-	}
-
-	// 创建 Index 请求
-	req := esapi.IndexRequest{
-		Index:      indexName,
-		DocumentID: idKey,
-		Body:       bytes.NewBuffer(dataJson),
-		Refresh:    "true", // 可选，立即刷新索引，使文档可搜索
-	}
-
-	// 执行请求
-	response, err := req.Do(context.Background(), model.GetDb().Client)
+// InsertSchema 使用 create 语义写入，实现 IndexTable/Schema；空 ID 生成 UUID，已有文档返回 409。
+// 需要重发幂等时应预先设置稳定 ID；自动生成的 ID 不写回调用方对象。
+func (m *EsModel) InsertSchema(data any) error {
+	ctx, cancel, err := m.begin()
 	if err != nil {
 		return err
 	}
-
-	defer response.Body.Close()
-	io.Copy(io.Discard, response.Body)
-
-	if response.IsError() {
-		return errors.New(response.String())
+	defer cancel()
+	index, err := m.indexName(data)
+	if err != nil {
+		return err
 	}
+	id, err := documentID(data, true)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	response, err := m.Db.Create(index, id, bytes.NewReader(body), m.Db.Create.WithContext(ctx))
+	if err = closeOnError(response, err); err != nil {
+		return err
+	}
+	return core.CheckResponse(ctx, response)
+}
 
-	return nil
+// FindOne 将文档解码到调用方的非 nil 指针并设置 Schema ID，不存在时返回 core.ErrNotFound。
+func (m *EsModel) FindOne(id string, target any) error {
+	ctx, cancel, err := m.begin()
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	index, err := m.indexName(target)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return errors.New("opensearch document ID is required")
+	}
+	response, err := m.Db.Get(index, id, m.Db.Get.WithContext(ctx))
+	if err = closeOnError(response, err); err != nil {
+		return err
+	}
+	return core.ParseGetResponse(ctx, target, response)
+}
+
+// Delete 根据目标的 IndexName 删除指定文档；404 返回 core.ErrNotFound，由业务决定是否忽略。
+func (m *EsModel) Delete(id string, target any) error {
+	ctx, cancel, err := m.begin()
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	index, err := m.indexName(target)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return errors.New("opensearch document ID is required")
+	}
+	response, err := m.Db.Delete(index, id, m.Db.Delete.WithContext(ctx))
+	if err = closeOnError(response, err); err != nil {
+		return err
+	}
+	return core.CheckResponse(ctx, response)
+}
+
+// UpdateSchema 使用 OpenSearch 的 doc 包装执行局部更新，文档不存在时返回 core.ErrNotFound。
+func (m *EsModel) UpdateSchema(data any) error {
+	ctx, cancel, err := m.begin()
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	index, err := m.indexName(data)
+	if err != nil {
+		return err
+	}
+	id, err := documentID(data, false)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(map[string]any{"doc": data})
+	if err != nil {
+		return err
+	}
+	response, err := m.Db.Update(index, id, bytes.NewReader(body), m.Db.Update.WithContext(ctx))
+	if err = closeOnError(response, err); err != nil {
+		return err
+	}
+	return core.CheckResponse(ctx, response)
+}
+
+// Search 将命中正文解码到 target 切片指针，返回准确总数、原始 JSON 聚合结果和错误，不暴露已关闭的原始响应。
+// indexTarget 提供 IndexName；固定 track_total_hits=true，空命中时目标为非 nil 空切片。
+func (m *EsModel) Search(indexTarget any, target any, query map[string]any) (int64, core.Aggregations, error) {
+	ctx, cancel, err := m.begin()
+	if err != nil {
+		return 0, nil, err
+	}
+	defer cancel()
+	index, err := m.indexName(indexTarget)
+	if err != nil {
+		return 0, nil, err
+	}
+	body, err := json.Marshal(query)
+	if err != nil {
+		return 0, nil, err
+	}
+	response, err := m.Db.Search(m.Db.Search.WithContext(ctx), m.Db.Search.WithIndex(index), m.Db.Search.WithBody(bytes.NewReader(body)), m.Db.Search.WithTrackTotalHits(true))
+	if err = closeOnError(response, err); err != nil {
+		return 0, nil, err
+	}
+	return core.ParseSearchResponse(ctx, target, response)
+}
+
+// IndexSchema 全量覆盖指定 ID 的文档，不存在时创建；必须提供稳定 ID，保留原 refresh=true 行为。
+// 字段缺失会被覆盖移除，局部修改使用 UpdateSchema；refresh=true 会增加写入成本。
+func (m *EsModel) IndexSchema(data any) error {
+	ctx, cancel, err := m.begin()
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	index, err := m.indexName(data)
+	if err != nil {
+		return err
+	}
+	id, err := documentID(data, false)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	response, err := m.Db.Index(index, bytes.NewReader(body), m.Db.Index.WithContext(ctx), m.Db.Index.WithDocumentID(id), m.Db.Index.WithRefresh("true"))
+	if err = closeOnError(response, err); err != nil {
+		return err
+	}
+	return core.CheckResponse(ctx, response)
 }

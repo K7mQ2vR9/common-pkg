@@ -40,7 +40,7 @@
 | 13 | AES-GCM nonce、密钥校验和加密失败处理 | 已完成、验证并确认，使用进程级配置开关 |
 | 14 | gRPC 客户端成功分支、服务端认证和状态码 | 已完成、验证并确认 |
 | 15 | RabbitMQ 队列绑定、重连和重新订阅 | 已实现重试、TG 通知、统一链路、处理超时、业务消息接口、消费错误分类和终态双份确认，已验证；后续完善逐项确认 |
-| 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | 待处理 |
+| 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | Elasticsearch 7 已完成并确认；OpenSearch 独立实现已开发并验证，待确认；XXL-JOB 待处理 |
 | 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | 待处理 |
 
 ## 开发记录
@@ -539,3 +539,65 @@ git diff --check
 
 - **结果与限制** 10 组定向测试及竞态检测、全量构建、原有测试编译通过；格式、diff 和说明相对链接/新增锚点检查通过，原有五个测试保留。驱动接口模拟发布、确认与路由失败，无真实 RabbitMQ/TG 联调或外部消息发送；真实队列删除、重连和部署参数仍需联调。未运行原有集成测试业务逻辑。
 - **测试清理** 清理前已登记全部实际命令、结果和限制，随后删除本次临时测试、overlay、测试输出和独立构建缓存。核对任务临时目录及仓库内 overlay 目标均不存在，原有五个测试全部保留。API/RPC 本次只更新文档，无新增测试或临时产物。
+
+
+### 2026-11-19 / DEV-20261119-018 / Elasticsearch 7 独立配置及请求生命周期
+
+- **用户确认** Elasticsearch 7 与 OpenSearch 分为两套独立实现，配置、初始化、错误、连接池和文档各自维护。本轮仅开发 es/esv7，完成后等用户确认再处理 OpenSearch；XXL-JOB 尚未开始。
+- **独立配置** 新增 core.Config、TLSConfig 和 TransportConfig，全部字段补齐中文用途、默认值和单位。Addresses 必填，HTTP/HTTPS 可带路径前缀，认证使用独立字段；默认系统证书验证及 TLS 1.2，自定义 CAFile 追加信任，无法读取或无有效证书初始化失败，InsecureSkipVerify 默认 false。StartupTimeout 默认 5s、RequestTimeout 默认 10s，连接/TLS/响应头阶段默认 5s，连接池三个上限默认 100，空闲保留 90s；零值取默认、负值拒绝，校验每节点空闲数不超过连接总数。配置不修改调用方对象。
+- **重试与认证** MaxRetries 改为 *int，nil 默认 3，显式 0 设置 SDK DisableRetry；针对当前 v7.17.10 SDK 直接 io.EOF 仍重试的特例，在关闭重试时包装该错误，保留 errors.Is(io.EOF)，避免绕过配置。SDK 自带认证替代重复手工 Basic Auth 头，单次只发送一条认证头；网络/502/503/504 重试沿用 SDK 规则，操作总预算不随重试重置。
+- **初始化与关闭** NewEs(ctx, conf)/MustNewEs(ctx, conf) 接收启动上下文并执行 Info 探活，使用 StartupTimeout 与上游较早的截止时间，读取完成再取消，失败释放空闲连接。Close 可并发和重复调用，拒绝后续请求并释放连接池空闲连接，不强制取消在途 I/O。OperationContext 派生模型请求预算，调用方完成响应处理后再 cancel。移除旧签名、手工认证函数和未启用的旧 tracing transport/孤立指标定义，无兼容包装。
+- **响应与错误** ReadResponse、CheckResponse 和 Get/Search 解析均接管响应体，在成功、404、错误状态、读取/关闭/解码失败及取消时释放；错误响应最多读取 4KiB，不无限 drain。独立 ErrNotFound/ErrInvalidResponse/ErrClosed 和 ResponseError 支持 errors.Is/As，HTTP 状态与最多 128 字节 error.type 用于诊断，不输出原始正文或 error.reason；JSON/网络/上下文错误保留底层错误链。Get 的 404/found=false 返回 ErrNotFound，成功直接解码到业务指针并设置 Schema ID，修复原 &interface{} 目标传递。
+- **模型操作** 创建索引、create 写入、单查、删除、局部更新和搜索均继承 model.Ctx 并应用 RequestTimeout，不再用 Background 替换。增加 nil 模型/上下文/客户端、typed nil、空索引或 ID 校验。局部更新补齐 Elasticsearch 必需的 doc 包装。Search 删除已关闭的原始响应返回值，只返回 (int64, error) 并写入目标切片；使用原始 JSON 片段保留大 int64 精度，支持对象/数字 total 和空命中，track_total_hits=true 获取准确总数，统计成本在文档注明。
+- **使用说明** 新建 [Elasticsearch 7 使用说明](es/esv7/README.md)，包含独立 YAML 默认值、完整初始化/FindOne/Search 示例、低层 SDK 请求预算与响应释放、错误语义和签名变更。原有 esv7/core/es_test.go 仅更新注释中的旧签名和指针配置，原测试继续保留；未修改 OpenSearch 或 XXL-JOB 源码。
+- **定向验证** 最终 20 组 TestES7 用例及 -race 通过，其中 core 13 组、model 7 组。真实本机 HTTP/TLS 验证默认不信任证书拒绝、自定义 CA 信任及显式测试跳过、无效 CA、Basic Auth 单头、连接池覆盖、初始化上下文取消/超时和阶段超时；验证 SDK 重试 0/2 次以及关闭重试时直接 EOF 仅一次、开启时重试。
+- **模型与清理验证** 覆盖所有六类操作的成功/上下文超时/取消、404 映射及 doc 更新封装、父级在途取消、正文读取时限、多个重试共享预算、Close 并发与后续请求拒绝；响应体正常/失败/解码/关闭错误链、4KiB 读取及 UTF-8 摘要边界、nil 响应/目标及必要字段校验、文档 ID 写回、大 int64、空搜索结果及不同 total 格式。README 的两段完整 Go 范例抽取编译通过，未运行需要真实服务的文档程序。
+- **实际执行与排障** 初次定向命令被沙箱禁止本地监听端口拦住，获得仅本地 HTTP/TLS 测试所需权限后继续。首次本地运行 core 通过，model 临时服务未读取请求体导致测试服务清理等待并触发 60s 测试超时；修正临时服务读取请求体后通过。随后补充 EOF 边界与定向验证，最终完整 20 组 -race 回归通过。未把测试服务等待问题当作产品通过结果。
+- **执行命令** 平台根目录执行，使用独立 GOCACHE=/private/tmp/new-platform-es7.hk7ZJfwS/cache、GOPROXY=off，定向命令额外设置 ES7_TEST_ARTIFACTS=/private/tmp/new-platform-es7.hk7ZJfwS/artifacts。overlay 测试、本地证书、测试输出、抽取范例与缓存均在此临时目录，未下载依赖。
+
+```text
+go build -mod=readonly -buildvcs=false ./common-pkg/es/esv7/...
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-es7.hk7ZJfwS/overlay.json -run '^TestES7' -count=1 -v ./common-pkg/es/esv7/... -timeout=60s
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-es7.hk7ZJfwS/overlay.json -run '^TestES7NoRetryEOF$' -count=1 -v ./common-pkg/es/esv7/core -timeout=30s
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-es7.hk7ZJfwS/overlay.json -run '^TestES7' -count=1 -v ./common-pkg/es/esv7/... -timeout=45s
+go build -mod=readonly -buildvcs=false -o <临时目录>/example_1 <临时目录>/example_1.go
+go build -mod=readonly -buildvcs=false -o <临时目录>/example_2 <临时目录>/example_2.go
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/es/esv7/core/*.go common-pkg/es/esv7/model/*.go
+git -C common-pkg diff --check
+git diff --check
+git -C common-pkg diff --exit-code -- es/esaws xxlJob
+```
+
+- **结果与限制** 最终 20 组定向测试、竞态检测、两段范例编译、全量构建和原有测试编译通过，格式和 diff 检查通过，OpenSearch/XXL-JOB 无改动。真实本机 HTTP/TLS 服务验证协议和取消，响应体关闭计数、读取故障及 EOF 使用测试替身；未连接真实 Elasticsearch 集群，也未执行原有外部服务集成测试。直接用底层 SDK 须自行提供上下文/预算并释放响应，JSON 同步计算不可强制中断，准确总数查询有统计成本。写入结果不确定和业务幂等由接入方处理。
+- **测试清理** 清理前已登记实际命令、结果、初次失败原因和限制；随后删除本次两份 overlay 测试、overlay 配置、全部测试输出、CA 证书、两份范例及编译产物和独立构建缓存。核对任务临时目录与仓库内两处 overlay 目标均不存在，原有五个测试全部保留；原 ES7 测试只更新注释范例。API/RPC 本轮仅更新文档，无新增测试或临时产物。
+
+
+### 2026-11-20 / DEV-20261120-001 / OpenSearch 独立配置、原生响应与聚合
+
+- **用户确认** 接续 Elasticsearch 7，本轮独立开发 es/esaws，自行维护配置、TLS、连接池、错误和文档，不建立共用类型或兼容入口；保留 BusinessCode 后缀、聚合及 IndexSchema 全量覆盖。XXL-JOB 尚未处理。
+- **独立类型与配置** 根包声明改为 esaws，自行定义 IndexTable/Schema；新增独立 core.Config/TLSConfig/TransportConfig，不引用 es/esv7。缺省系统证书验证及 TLS 1.2，自定义 CAFile 追加信任；StartupTimeout 5s、模型 RequestTimeout 10s，TCP/TLS/响应头阶段 5s，连接池三项上限 100、空闲保留 90s，省略或零值采用默认，负值及非法地址/连接上限拒绝。MaxRetries 改为 *int，nil 默认 3、显式 0 关闭，配置不修改调用方对象。
+- **初始化与 SDK 边界** NewEs(ctx, conf)/MustNewEs(ctx, conf) 执行受控 Info 探活，失败释放空闲连接；删除 InitESClient 和旧 MustNewEs 签名。当前 opensearch-go v1.1.0 内部产品探活使用 Background，关闭该隐式探活，改由本包检查连接、认证、HTTP 状态和 JSON 正文。删除原不可取消的随机指数退避，不设置使用 time.Sleep 的 SDK RetryBackoff；重试仍按默认网络错误及 502/503/504 触发并共用操作额度，不额外开启超时重试。关闭重试时包装直接 io.EOF，防止 SDK 特例绕过 DisableRetry，并保留 errors.Is 链。
+- **路径和生命周期** SDK v1 在重试时重复追加节点路径前缀；通过本套 Perform 记录原始路径和 RawPath，网络请求使用副本，恢复 SDK 原始路径以供下一次重试/切换节点，保留文档 ID 转义及调用方 URL。生成 API 绑定到当前实例，底层原生 Transport 保留 SDK Metrics/DiscoverNodes 能力。Close 可并发或重复调用，释放空闲连接并拒绝新请求，在途请求由自身 ctx 取消；OperationContext 提供单次模型总预算，父级更早截止时间优先。
+- **原生响应与错误** 删除 Elasticsearch v7/v8 响应、聚合类型及强制转换，统一使用 opensearchapi.Response。ReadResponse/CheckResponse/Get/Search 在正常、404、错误状态、取消、读取/解码/关闭失败时释放正文，不先 drain 再取错误，也不先关闭再读取；错误正文最多读取 4KiB，错误类型摘要最多 128 字节，不直接输出原始正文或 error.reason。独立 ErrNotFound/ErrInvalidResponse/ErrClosed 和 ResponseError 支持 errors.Is/As，删除旧 EsNotFound/Es500Err；Get 的 404/found=false 返回 ErrNotFound，直接解码到业务指针并设置 Schema ID。
+- **模型与聚合** 七类操作继承 model.Ctx，使用单次 RequestTimeout，删除业务调用中的 Background。BusinessCode 非空时模型文档与搜索操作使用基础名加下划线及业务码；IndexAuto 继续接受完整索引名，不自动加后缀。保留 create 自动 ID/稳定 ID、doc 局部更新和 IndexSchema 非空 ID 全量覆盖及 refresh=true。Search 返回 (int64, core.Aggregations, error)，不返回已关闭响应；Aggregations 为本套定义的 map[string]json.RawMessage，未知/嵌套聚合和服务端原始数值保留，空聚合返回空 map，空命中为空切片，固定 track_total_hits=true 并注明统计成本。
+- **注释、文档与现有调用** 新增 [OpenSearch 使用说明](es/esaws/README.md)，包含独立 YAML 默认值、初始化/业务后缀/查询与聚合解码、全量覆盖及底层 SDK 超时释放范例。删除未启用旧 transport、手工重复认证头函数及孤立指标；认证由 SDK 自行处理。原核心测试仅更新注释范例，原 es/test 集成测试更新 ctx、指针重试配置、Close 和 Search 范例，用 errors.As/StatusCode 替换旧错误文案匹配，保留原测试。API/RPC 仅登记接入约定。
+- **定向验证** 最终 23 组 TestOS 测试及 -race 通过，core 14 组、model 9 组。真实本机 HTTP/TLS 覆盖单次受控探活、Basic Auth 单头、连接池覆盖、默认不信任证书拒绝/自定义 CA/测试跳过/无效 CA、启动响应头和正文超时、父级取消、阶段超时；验证重试 0/2 次、直接 EOF 的关闭/开启重试、节点前缀不重复和文档 ID 转义、调用方 URL 不变、Close 并发与后续拒绝。
+- **模型与解析验证** 覆盖七类操作成功及取消/超时、BusinessCode 有无后缀和显式索引名、404 错误映射、doc 更新与 refresh 覆盖写入、稳定 ID 重试时正文复用及自动 ID 行为、在途父级取消/正文读取/多次重试共用预算；正常/错误/读取及关闭失败的正文释放、摘要长度与 UTF-8 边界、nil 及必要字段校验、大 int64、total 两种格式、空命中/空聚合、嵌套桶和未知聚合原样解码。go list 生产依赖树无 Elasticsearch 或 es/esv7 引用，按任务开始时的 SHA-256 快照验证 ES7 和 XXL-JOB 文件未被本轮修改。
+- **执行与结果** 使用 GOCACHE=/private/tmp/new-platform-opensearch.djrNAnWE/cache、GOPROXY=off，定向测试设置 OS_TEST_ARTIFACTS=/private/tmp/new-platform-opensearch.djrNAnWE/artifacts；本地监听测试经权限审核运行，不连接外部服务。首次 core 14 组通过，model 两个用例错误假设 SDK create 路径为 /index/_create/id；按实际 v1 原生 /index/_doc/id/_create 修正临时测试预期后通过，未为迎合测试改变业务请求。最后调整 API 绑定保留原生 Transport 能力后再次完整回归，最终 23 组通过。三段 README Go 范例抽取编译通过；全量构建、原有测试编译、gofmt 和 diff 检查通过，无下载或新依赖。
+
+```text
+go build -mod=readonly -buildvcs=false ./common-pkg/es/esaws/...
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-opensearch.djrNAnWE/overlay.json -run '^TestOS' -count=1 -v ./common-pkg/es/esaws/... -timeout=45s
+go list -deps -mod=readonly -buildvcs=false ./common-pkg/es/esaws/...
+go build -mod=readonly -buildvcs=false -o <临时目录>/example_N <临时目录>/example_N.go  （N=1..3，逐一执行）
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/es/esaws/core/*.go common-pkg/es/esaws/model/*.go common-pkg/es/esaws/esInterface.go common-pkg/es/test/es_test.go
+git -C common-pkg diff --check
+git diff --check
+```
+
+- **限制** 使用真实本地 HTTP/TLS 和当前 SDK 验证协议行为，故障正文和 EOF 使用测试替身；未连接真实 OpenSearch 集群或执行原有集成测试业务逻辑。初始化探活不替代实际集群/索引权限及版本联调；SDK 高级调用须自行提供上下文预算并释放正文，JSON 同步计算不可强制中断，准确总数和 refresh=true 有额外成本，写入结果不确定与幂等由接入方处理。当前 SDK 节点发现等高级功能保留，未新增其真实集群联调。
+- **测试清理** 清理前已登记实际命令、结果、首次测试预期错误和限制；随后删除本次两份临时 overlay 测试、配置、全部测试输出、CA 文件、依赖清单、快照、三份抽取范例及编译产物和独立构建缓存。已核对任务临时目录与两处仓库 overlay 目标均不存在，原有五个测试全部保留，原 OpenSearch 测试仅按新接口同步；按删除前快照对照确认本轮未改 ES7/XXL-JOB 文件。API/RPC 仅更新文档，无新增测试或临时产物。

@@ -2,13 +2,14 @@ package test
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/K7mQ2vR9/base-pkg/es/esaws/core"
-	"github.com/K7mQ2vR9/base-pkg/es/esaws/model"
 	"os"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/K7mQ2vR9/base-pkg/es/esaws/core"
+	"github.com/K7mQ2vR9/base-pkg/es/esaws/model"
 )
 
 // 定义一个实现 IndexTable 接口的结构体
@@ -51,12 +52,13 @@ func TestLogInfo(t *testing.T) {
 		t.Skip("configure COMMON_PKG_OPENSEARCH_TEST_URL, COMMON_PKG_OPENSEARCH_TEST_USERNAME and COMMON_PKG_OPENSEARCH_TEST_PASSWORD to run this integration test")
 	}
 
-	esClient := core.MustNewEs(&core.Config{
+	esClient := core.MustNewEs(context.Background(), &core.Config{
 		Addresses:  []string{address},
 		Username:   username,
 		Password:   password,
-		MaxRetries: 3,
+		MaxRetries: nil, // 未配置默认重试 3 次。
 	})
+	defer esClient.Close()
 	ctx := context.Background()
 	esModel := model.NewEsModel(ctx, esClient, "10003002")
 
@@ -69,7 +71,8 @@ func TestLogInfo(t *testing.T) {
 	data := &MyIndexTable{_indexName: "test_log", _id: "1", Timestamp: tm * 1000, UserName: "123", Age: 123}
 	err := esModel.InsertSchema(data)
 	if err != nil {
-		if strings.Contains(err.Error(), "409 Conflict") {
+		var responseError *core.ResponseError
+		if errors.As(err, &responseError) && responseError.StatusCode == 409 {
 			fmt.Println(err)
 		}
 		fmt.Println(err.Error())
@@ -105,7 +108,7 @@ func TestLogInfo(t *testing.T) {
 	//基本查询
 	//data3 := &MyIndexTable{_indexName: "example_index", _id: "1111"}
 	//resData := make([]MyIndexTable, 0)
-	//res, num, err := esModel.Search(data3, &resData, map[string]interface{}{
+	//num, _, err := esModel.Search(data3, &resData, map[string]interface{}{
 	//	"from": 0, //todo 是从0开始的哟
 	//	"size": 2,
 	//	"query": map[string]interface{}{
@@ -124,12 +127,12 @@ func TestLogInfo(t *testing.T) {
 	//	fmt.Println(err)
 	//	return
 	//}
-	//fmt.Println(res, num)
+	//fmt.Println(num)
 
 	//简单聚合查询
 	//data4 := &MyIndexTable{_indexName: "example_index", _id: "1111"}
-	//resData := MyIndexTable{}
-	//res, num, aggregate, err := esModel.Search(data4, &resData, map[string]interface{}{
+	//resData := make([]MyIndexTable, 0)
+	//num, aggregate, err := esModel.Search(data4, &resData, map[string]interface{}{
 	//	"size": 0, // 不需要返回具体文档
 	//	"aggs": map[string]interface{}{
 	//		"user_id": map[string]interface{}{
@@ -144,12 +147,12 @@ func TestLogInfo(t *testing.T) {
 	//	return
 	//}
 	//fmt.Println(aggregate)
-	//fmt.Println(res, num)
+	//fmt.Println(num)
 
 	//分组聚合查询
 	//data4 := &MyIndexTable{_indexName: "example_index", _id: "1111"}
-	//resData := MyIndexTable{}
-	//res, num, aggregate, err := esModel.Search(data4, &resData, map[string]interface{}{
+	//resData := make([]MyIndexTable, 0)
+	//num, aggregate, err := esModel.Search(data4, &resData, map[string]interface{}{
 	//	"size": 0, // 不需要返回具体文档
 	//	"aggs": map[string]interface{}{
 	//		"amount_by_user": map[string]interface{}{
@@ -171,5 +174,5 @@ func TestLogInfo(t *testing.T) {
 	//	return
 	//}
 	//fmt.Println(aggregate)
-	//fmt.Println(res, num)
+	//fmt.Println(num)
 }

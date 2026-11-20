@@ -3,10 +3,10 @@ package core
 import "testing"
 
 func TestLogInfo(t *testing.T) {
-	// esv8 := MustNewEs(&Config{
+	// client := MustNewEs(context.Background(), &Config{
 	// 	Addresses:  nil,
 	// 	Username:   "",
 	// 	Password:   "",
-	// 	MaxRetries: 0,
+	// 	MaxRetries: nil, // 缺省为 3，指向 0 时关闭重试。
 	// })
 }
