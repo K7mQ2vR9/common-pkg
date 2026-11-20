@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 
 	"github.com/K7mQ2vR9/base-pkg/commonTool"
@@ -70,6 +71,7 @@ func (m *EsModel) indexName(value any) (string, error) {
 	return name, nil
 }
 
+// documentID 保留业务 ID；仅创建文档允许生成 UUIDv7，生成失败在网络写入前返回并保留错误链。
 func documentID(value any, generate bool) (string, error) {
 	if missing(value) {
 		return "", errors.New("opensearch document is required")
@@ -80,7 +82,11 @@ func documentID(value any, generate bool) (string, error) {
 	}
 	id := schema.GetId()
 	if id == "" && generate {
-		id = commonTool.GenUUID().String()
+		generatedID, err := commonTool.NewUUidV7()
+		if err != nil {
+			return "", fmt.Errorf("opensearch generate document ID: %w", err)
+		}
+		id = generatedID
 	}
 	if id == "" {
 		return "", errors.New("opensearch document ID is required")
@@ -114,7 +120,8 @@ func (m *EsModel) IndexAuto(index string) error {
 	return core.CheckResponse(ctx, response)
 }
 
-// InsertSchema 使用 create 语义写入，实现 IndexTable/Schema；空 ID 生成 UUID，已有文档返回 409。
+// InsertSchema 使用 create 语义写入，实现 IndexTable/Schema；空 ID 生成 UUIDv7，已有文档返回 409。
+// UUID 生成失败时直接返回错误，不发送写入请求。
 // 需要重发幂等时应预先设置稳定 ID；自动生成的 ID 不写回调用方对象。
 func (m *EsModel) InsertSchema(data any) error {
 	ctx, cancel, err := m.begin()

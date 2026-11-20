@@ -41,7 +41,9 @@
 | 14 | gRPC 客户端成功分支、服务端认证和状态码 | 已完成、验证并确认 |
 | 15 | RabbitMQ 队列绑定、重连和重新订阅 | 已实现重试、TG 通知、统一链路、处理超时、业务消息接口、消费错误分类和终态双份确认，已验证；后续完善逐项确认 |
 | 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | Elasticsearch 7、OpenSearch、XXL-JOB 已完成并确认 |
-| 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | HTTP 请求、随机字符串、TOTP 已完成并确认；Redis 分片已开发并完成定向验证，待确认 |
+| 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | 已完成、验证并确认 |
+| 18 | 搜索模型 UUID 旧引用与全量编译恢复 | 已完成、验证并确认 |
+| 19 | 时间工具独立管理、UTC 默认值与日历边界 | 已开发并验证，待确认 |
 
 ## 开发记录
 
@@ -740,3 +742,58 @@ rg -n 'ShardIndexXX|ShardTagXX' common-pkg --glob '*.go'
 
 - **限制** 纯函数、原路由样本与并发验证，不连接真实 Redis 集群，不验证实际负载热点或执行数据迁移。原有外部集成测试未执行，相关编译检查仅使用 -run '^$'；全量构建限制如上登记。API/RPC 本轮只更新约定，无业务代码或测试产物。
 - **测试清理** 清理前已登记实际命令、结果和既有失败；随后删除本次原函数抽取程序、121 组结果、临时测试及 overlay、全部测试/构建输出、源码摘要、范例源码/编译产物及独立构建缓存。核对任务临时目录及仓库 overlay 目标均不存在，原有五个测试全部保留；除 redis_shards.go 与开发记录外，原有公共包文件摘要一致，新增文件仅为使用说明。API/RPC 本轮只更新文档，无新增测试或临时产物。
+
+
+### 2026-11-20 / DEV-20261120-007 / 搜索模型 UUID 旧引用修复
+
+- **用户确认与范围** 第 17 项 Redis 分片已确认，新增第 18 项处理阻断全量构建的 ES7/OpenSearch GenUUID 旧引用。两套模型空 ID 创建均复用现有 NewUUidV7，生成失败直接返回并保留错误链；不恢复旧接口，不改 UUID 生成器、RPC/API 业务或其他组件。
+- **实现与备注** 两处 documentID 在空 ID 且 generate=true 时调用 commonTool.NewUUidV7()，失败以 %w 包装包含各自组件和阶段的错误，返回空 ID；InsertSchema 在正文编码和 SDK 调用前退出。补齐私有 ID 解析与公开创建接口的中文注释，说明 UUIDv7、失败无写入、业务 ID 保留及不写回对象。已有 ID 继续原样使用，UpdateSchema 和 OpenSearch IndexSchema 缺少 ID 仍返回错误，不隐式生成。
+- **使用说明** 更新两套独立 README，明确空 create ID 为 36 字符 UUIDv7、同一 SDK 操作重试复用 ID、再次业务调用会重新生成、需要稳定重发标识时预先指定 ID；生成值不是业务自增序号，同一毫秒不保证递增。无新增文档代码范例或接口签名变化。
+- **定向验证** 8 组测试及 -race 全部通过，两套模型各 3 组正常行为和 1 组生成失败。正常验证指定业务 ID 在生成开关两种模式下保留、真实生成的 UUIDv7 格式/版本/variant、nil/typed nil/非法 Schema、空 ID 更新拒绝；SDK 503 后成功重试保持同一文档 ID 和正文，自动 ID 不回写且正文只编码一次，响应关闭；两次指定 ID 创建使用同一 ID，更新保留 ID。OpenSearch 另覆盖缺少 ID 的全量覆盖拒绝。
+- **失败路径验证** 第二份临时 overlay 仅将 NewUUidV7 替换为返回 os.ErrPermission，分别验证 documentID/InsertSchema 的 errors.Is 错误链、空返回值、零正文编码、零 SDK/传输调用及调用方未修改；指定 ID 创建和更新仍成功，证明这两类操作不依赖生成器。通过临时 SDK 客户端工厂设置正常请求预算并使用内存 HTTP RoundTripper，无本地监听或外部请求；未在产品代码引入可替换函数变量、测试开关或兼容入口。
+- **全量恢复与范围核对** 无 overlay 的全量构建和全部原有测试编译恢复通过，原 es/test 的编译阻断解除；未执行原有外部服务集成测试逻辑。Go 源码检索无 GenUUID 残留，gofmt、diff 和说明本地链接检查通过。按任务开始 SHA-256 快照核对，除两套模型源码、README 和开发记录外的原有公共包文件全部未变，UUID 生成器与原有五个测试保留。
+- **实际命令** 平台根目录执行，独立 GOCACHE=/private/tmp/new-platform-uuid-ref.51cm8eoh/cache、GOPROXY=off；故障命令额外 UUID_REF_FAILURE=1。两份模型测试、两份临时 core 工厂、失败生成器、两个 overlay、测试/构建输出、源码摘要及缓存均在同一任务目录，仓库内仅通过 overlay 虚拟注入，无依赖下载或新增依赖。
+
+```text
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-uuid-ref.51cm8eoh/overlay.json -run '^TestUUIDRef(DocumentID|CreateAndRetry|UpdateRequiresID)$' -count=1 -v ./common-pkg/es/esv7/model ./common-pkg/es/esaws/model -timeout=45s
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-uuid-ref.51cm8eoh/failure-overlay.json -run '^TestUUIDRefFailure$' -count=1 -v ./common-pkg/es/esv7/model ./common-pkg/es/esaws/model -timeout=45s
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/es/esv7/model/es_model.go common-pkg/es/esaws/model/es_model.go
+git -C common-pkg diff --check
+git diff --check
+rg -n 'GenUUID' common-pkg --glob '*.go'  （无匹配，退出码 1）
+```
+
+- **限制** SDK 传输替身验证请求和重试行为，无真实 Elasticsearch/OpenSearch 集群联调。生成失败用临时源码 overlay 注入，未破坏系统熵源；现有生成器和其运行时行为不变，不能将 Go 的致命随机源失败转换为普通错误。自动 ID 不回写及跨业务重发可能生成新 ID 的现有行为保留，业务幂等仍由稳定 ID 控制。
+- **测试清理** 清理前已登记实际命令、结果和限制；随后删除本轮两份模型测试、两份临时 core 工厂、失败生成器、两个 overlay、全部测试/构建输出、源码摘要及独立构建缓存。核对任务临时目录和四个仓库虚拟新增目标均不存在，原有五个测试全部保留；除两套模型源码、README 及开发记录外的原有公共包文件摘要一致，UUID 生成器未改动，无新增持久测试或产物。API/RPC 本轮只更新文档，无新增测试或临时产物。
+
+
+### 2026-11-20 / DEV-20261120-008 / 独立时间工具与 UTC 默认值
+
+- **用户确认与补充** 第 18 项 UUID 修复已确认，开始第 19 项时间工具；用户要求新建独立文件管理，并再次明确未指定时区默认按零时区计算。先前已确认统一 TimeTool、显式基准时间、日历边界、严格解析与秒级差值、删除旧接口的范围。
+- **文件与接口** 新增 commonTool/time_tool.go，将八个旧时间函数从 tool.go 移除，无兼容包装；当前仓库无业务调用方。NewTimeTool(timezone) 构造只读实例，提供 DayStart/YesterdayStart/MonthStart/LastMonthStart、Date、FormatUnix、Parse、DiffSeconds，以及 DateTimeLayout/DateLayout 和 ErrAmbiguousLocalTime；公开接口、字段、单位、默认值和关键逻辑均补齐中文注释。tool.go 仅保留原有非时间工具，不改其行为。
+- **时区默认** 空配置、UTC、零值和 nil 工具均使用 UTC（零时区），不读取或修改 time.Local。显式 IANA 时区在初始化加载，非法名称和 Local 返回错误不回退。引入标准库 time/tzdata，在系统缺少时区数据时提供内置后备，不新增第三方依赖。调用方处理构造错误，实例可跨请求并发复用，基准时间显式传入。
+- **日历边界** 先将基准时刻转换到工具时区，再按年月日取日初、前一日和月初；上月从本月第一天回退，避免 3 月 31 日减月归一化回本月。相邻时区切换的偏移与边界参与候选判断，零点不存在取首个有效时刻、重复零点取较早者，整日被跳过时边界为跳变后的首个有效时刻，对应空日区间；不假设每个日历日都等于 24 小时。
+- **格式与解析** FormatUnix 输入单位为秒，0 为合法 Unix 起点，负数为起点之前；Date 按指定时区直接格式化。Parse 严格 YYYY-MM-DD HH:MM:SS，拒绝非法日期、额外空白、小数秒及不规范格式，拒绝跳变中不存在或有歧义的本地时间；底层 time.ParseError 保留 errors.As 链，重复时间以 ErrAmbiguousLocalTime 供 errors.Is 判断。DiffSeconds 返回 end-start 实际秒差，允许负值，解析失败不继续计算；使用 Unix 秒差避免 time.Duration 跨约 292 年的饱和。
+- **使用说明与迁移** 新建 [时间工具使用说明](commonTool/TIME_TOOL.md)，突出默认 UTC，包含接口/单位、两个完整 Go 范例、日历和夏令时行为、八个旧接口迁移表，以及 API/RPC 按业务契约传入时区的约定。当前时间直接使用 time.Now()/Unix，不新增只读当前时间的包装；工具不自动读取请求头或修改服务时区。
+- **定向验证** 15 组 TestTimeTool 及 -race 全部通过：默认/零值/nil UTC、非法时区，UTC/上海/胡志明/印度/尼泊尔/洛杉矶跨日，闰年/跨年/月底和时区跨月，纽约 23/25 小时日，圣保罗零点跳过、哈瓦那重复零点、阿皮亚整日跳过；0/负秒格式化及往返，严格格式/非法日期/不存在时刻与 ParseError 链，歧义时刻及前后合法时刻；秒差正负零、夏令时实际秒差和 0001～9999 年超长跨度，错误阶段和歧义链；Python datetime/zoneinfo 在十个时区和十个时间点独立生成的 100 组日/月边界与格式化参考全部一致；64 goroutine 各 64 次共 4096 组跨实例只读调用及原始基准时间不变。
+- **非零服务器时区与全量检查** 单独以 TZ=America/Los_Angeles 再执行默认 UTC 用例及 -race，验证不随服务器本地时区改变；两段说明 Go 范例均抽取编译，独立 main 实际运行输出与文档一致。无 overlay 全量构建、全部原有测试编译、gofmt、diff 和本地文档链接检查通过，Go 源码无旧时间函数残留。按开始时摘要核对，除 tool.go 与开发记录外的原有公共包文件全部未变，上一项未提交的 UUID 修复完整保留。
+- **实际命令** 平台根目录执行，独立 GOCACHE=/private/tmp/new-platform-time.nz7q40l0/cache、GOPROXY=off，定向设置 TIME_TOOL_REFERENCE=/private/tmp/new-platform-time.nz7q40l0/reference.json；附加默认值命令使用 TZ=America/Los_Angeles。临时测试/overlay、100 组参考、测试/构建输出、源码摘要、抽取范例/产物和缓存均在此任务目录，无依赖下载。
+
+```text
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-time.nz7q40l0/overlay.json -run '^TestTimeTool' -count=1 -v ./common-pkg/commonTool -timeout=45s
+TZ=America/Los_Angeles go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-time.nz7q40l0/overlay.json -run '^TestTimeToolDefaultUTC$' -count=1 -v ./common-pkg/commonTool
+go build -mod=readonly -buildvcs=false -o /private/tmp/new-platform-time.nz7q40l0/example_1 /private/tmp/new-platform-time.nz7q40l0/example_1.go
+go build -mod=readonly -buildvcs=false -o /private/tmp/new-platform-time.nz7q40l0/example_2 /private/tmp/new-platform-time.nz7q40l0/example_2.go
+/private/tmp/new-platform-time.nz7q40l0/example_1
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/commonTool/tool.go common-pkg/commonTool/time_tool.go
+git -C common-pkg diff --check
+git diff --check
+rg -n 'TimeToString|DiffTimeUnix|GetNowTime|GetTodayZeroTimeInt|GetYesterdayZeroTimeInt|GetMonthZeroTimeInt|GetLastMonthZeroTimeInt|GetXZeroTodayTimeInt' common-pkg --glob '*.go'  （无匹配，退出码 1）
+```
+
+- **限制** 不执行原有外部服务集成测试，仅编译；未在实际 API/RPC 服务部署或另外安装 Go 1.22 工具链。内置 tzdata 后备通过标准库接入，未删除系统数据以模拟缺失，实际规则版本仍由部署数据或 Go 内置数据决定。无偏移本地字符串不能表达回拨歧义时刻，工具返回错误，需要精确表达时使用带偏移的跨服务协议。工具不提供闰秒、业务工作日或节假日计算，不自动修改业务时区配置。
+- **测试清理** 清理前已登记实际命令、结果和限制；随后删除本轮临时测试、overlay、100 组参考数据、全部测试/构建输出、源码摘要、两份范例源码/编译产物及独立构建缓存。核对任务临时目录和仓库 overlay 目标均不存在，原有五个测试全部保留；除 tool.go 和开发记录外的原有公共包文件摘要一致，包括上一项未提交的 UUID 修复；新增持久文件仅为 time_tool.go 与使用说明。API/RPC 只更新文档，无新增测试或临时产物。

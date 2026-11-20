@@ -116,7 +116,7 @@ func main() {
 | 接口 | 行为 |
 |---|---|
 | `IndexAuto(index) error` | 创建索引，索引已存在时返回服务端错误，不删除或重建 |
-| `InsertSchema(data) error` | 使用 create 语义写入，实现 IndexTable/Schema；空 ID 自动生成 UUID，已有 ID 冲突返回 409 |
+| `InsertSchema(data) error` | 使用 create 语义写入，实现 IndexTable/Schema；空 ID 自动生成 UUIDv7，已有 ID 冲突返回 409 |
 | `FindOne(id, target) error` | 解码到目标指针，并向实现 Schema 的目标设置文档 ID |
 | `UpdateSchema(data) error` | 使用 `{"doc": data}` 正文执行局部更新，要求非空 ID |
 | `Delete(id, target) error` | 按目标的 IndexName 删除指定文档 |
@@ -126,7 +126,9 @@ func main() {
 
 `Search` 设置 `track_total_hits=true` 获取准确总数，大数据量查询会增加统计成本；通过 `size` 和分页控制单次读取量。解析使用 JSON 原始片段直接解码到业务类型，避免先转换 float64 导致大 int64 丢失精度。旧的已关闭原始响应返回值已经删除。
 
-自动生成的 create ID 不写回调用方对象，需要稳定重发标识时业务提前设置 ID。局部更新会提交对象编码后的字段，是否包含零值由业务 JSON 标签决定，不提供自动字段差异计算。
+空 create ID 使用 `commonTool.NewUUidV7()` 生成 36 字符 UUIDv7；生成失败保留错误链并直接返回，不发送写入请求。业务已指定 ID 时原样使用。自动生成的 create ID 不写回调用方对象，同一次 SDK 请求重试复用该 ID，再次调用 `InsertSchema` 会重新生成；需要稳定重发标识时业务提前设置 ID。生成值不是业务自增序号，同一毫秒内不保证递增。
+
+局部更新会提交对象编码后的字段，是否包含零值由业务 JSON 标签决定，不提供自动字段差异计算。
 
 ## 错误与响应体
 
