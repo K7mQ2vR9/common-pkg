@@ -40,8 +40,8 @@
 | 13 | AES-GCM nonce、密钥校验和加密失败处理 | 已完成、验证并确认，使用进程级配置开关 |
 | 14 | gRPC 客户端成功分支、服务端认证和状态码 | 已完成、验证并确认 |
 | 15 | RabbitMQ 队列绑定、重连和重新订阅 | 已实现重试、TG 通知、统一链路、处理超时、业务消息接口、消费错误分类和终态双份确认，已验证；后续完善逐项确认 |
-| 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | Elasticsearch 7、OpenSearch 已完成并确认；XXL-JOB 生命周期已开发并验证，待确认 |
-| 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | 待处理 |
+| 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | Elasticsearch 7、OpenSearch、XXL-JOB 已完成并确认 |
+| 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | HTTP 请求已开发并验证，待确认；随机字符串、TOTP URI 和 Redis 分片工具待处理 |
 
 ## 开发记录
 
@@ -631,3 +631,31 @@ git diff --check
 
 - **限制** 使用真实本机 HTTP 监听和本地调度中心替身，未连接实际调度中心或发送外部回调；版本和部署地址仍须联调，未运行原有外部服务集成测试。Go 无法强制终止忽略取消的任务/日志提供器，关闭预算耗尽后业务须自行退出；队列和回调是内存状态，进程崩溃或关闭预算耗尽不保证回调送达；正常 string 返回没有业务 error 结果通道，业务须明确现有签名语义并自行幂等。注册响应取消后的远端瞬间状态不保证，摘除失败通过错误返回并依靠调度中心过期判定或管理处理。
 - **测试清理** 清理前已登记实际命令、结果、初次编译/审核问题及限制；随后删除本次临时测试、overlay、全部输出、快照、三份范例源码及编译产物和独立构建缓存。核对任务临时目录与仓库 overlay 目标均不存在，原有五个测试全部保留；删除前摘要对照确认搜索和 AMQP 未被本轮修改。API/RPC 只更新文档，无新增测试或临时产物。
+
+
+### 2026-11-20 / DEV-20261120-003 / HTTP 请求客户端与有界响应
+
+- **用户确认与范围** 接续第 17 项，按已讨论方案先处理 commonTool HTTP 请求；随机字符串、TOTP URI 和 Redis 分片本轮不修改。原 GET 10000 秒超时与注释不符，POST 无超时，两者逐次创建客户端、缺少请求上下文及响应体上限。删除旧 GetRequest/PostRequest，不保留兼容包装；仓库 Go 调用检索无残留。
+- **独立配置** 新增 HTTPConfig、HTTPTransportConfig 和 NewHTTPClient，配置字段、公开接口及关键逻辑补齐中文备注。总预算默认 10s，响应正文默认 4MiB；TCP/TLS/响应头默认 5s，连接池三项上限默认 100，空闲保留 90s。零值采用默认、负值拒绝，响应上限 MaxInt64 拒绝以避免加一溢出，每节点空闲数不得超过连接总数；不修改调用方配置或进程级默认客户端。HTTPS 使用系统证书验证和最低 TLS 1.2，代理沿用标准环境变量。
+- **请求与生命周期** Get/PostJSON 必须传入 ctx，保留原值和取消，父级更早截止时间优先；总预算覆盖 JSON 编码耗时及网络读取，编码失败或编码后超时不发送。共享连接池支持并发，Close 可并发重复调用，拒绝后续请求并释放空闲连接，在途请求受自身上下文控制。请求头规范大小写并复制多值切片，支持单一非空 Host 覆盖；POST 默认 application/json。
+- **响应与错误** 所有 2xx 成功，非 2xx 返回可 errors.As 识别的 HTTPStatusError，同时保留 HTTPResponse 的 StatusCode/Header/Body/BodyComplete。正文最多读取上限加一字节，超限保留上限内前缀并返回 ErrHTTPResponseTooLarge；自动 gzip 按解压后大小计。状态、读取、关闭、超限和取消错误可共存，保留 errors.Is/As 链，公开错误文本不输出 URL、凭证或正文。正常、异常和取消均释放响应体，调用方无需再 Close 响应。
+- **重定向与链路** 不自动跟随重定向，3xx 原样返回；不增加业务重试，POST 关闭已发送正文的自动重建/重放，标准库尚未发送正文前的连接恢复及 GET 原有恢复机制保留，共用调用预算。业务写入须自行幂等，网络错误不证明远端未处理。工具不自行生成或注入 Trace ID；跨 HTTP 传递已有 ID 的显式范例见新建 [HTTP 使用说明](commonTool/HTTP_CLIENT.md)，其中包含配置、GET、POST JSON、错误和服务关闭说明。
+- **定向验证** 20 组 TestHTTPTool 及 -race 全部通过：配置缺省/覆盖/非法值及不修改输入，200/201/202/204/206、查询和多值头，大 int64 JSON/Content-Type/Host/正文不可重建，301/304/400/401/429/500/503 与错误脱敏；空正文/恰好上限/超限/容量/状态和超限并存，gzip 解压后限额；读取及关闭故障和响应快照；JSON/nil ctx/未初始化/非法 URL/Host/头校验，编码消耗预算；GET/POST 取消/总超时、父级截止、正文超时及响应头阶段超时；GET/POST 不跟随重定向、带 Idempotency-Key 的 POST 不重放、连接复用与并发 Close、在途请求正常收尾、24 个并行 POST 隔离及不信任 TLS 证书拒绝。
+- **执行与排障** 定向测试以 overlay 注入，未在仓库创建测试文件；实际本机端口测试经权限审核运行。首次 19 组通过，非法头用例错误假设自定义 RoundTripper 会执行标准库头校验，调整临时测试为真实本机服务和原生 Transport 后完整 20 组通过，生产代码未为测试替身增加行为。范例复核脚本曾因源码缩进格式不同触发相等性断言，重新直接抽取当前文档源码后逐一编译通过，不涉及产品或范例编译失败。全量构建、原有测试编译、三段当前文档 Go 范例编译、gofmt 和 diff 检查均通过；按开始时 SHA-256 快照核对 AMQP、搜索、XXL-JOB 和其余三类工具未改动。
+- **实际命令** 平台根目录执行，GOCACHE=/private/tmp/new-platform-http.L9u6TtTp/cache、GOPROXY=off，无新增依赖或下载。临时测试、overlay、输出、快照、范例源码/产物和缓存均在同一任务目录。
+
+```text
+go build -mod=readonly -buildvcs=false ./common-pkg/commonTool
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-http.L9u6TtTp/overlay.json -run '^$' ./common-pkg/commonTool
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-http.L9u6TtTp/overlay.json -run '^TestHTTPTool' -count=1 -v ./common-pkg/commonTool -timeout=45s
+go build -mod=readonly -buildvcs=false -o <临时目录>/example_N <临时目录>/example_N.go  （N=1..3，逐一执行）
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/commonTool/curl.go common-pkg/commonTool/http_config.go
+git -C common-pkg diff --check
+git diff --check
+rg -n 'GetRequest\(|PostRequest\(' common-pkg --glob '*.go'  （无匹配，退出码 1）
+```
+
+- **结果与限制** 20 组定向测试及竞态检测、三段范例编译、全量构建及原有测试编译通过。仅使用本机 HTTP/TLS 和故障替身，未调用外部业务接口，未执行原有外部集成测试逻辑。同步 JSON 编码无法强制中断，Close 不强制结束在途请求；实际目标接口认证、响应契约和部署网络由接入业务联调。API/RPC 本轮仅更新接入约定，无业务代码或测试产物。
+- **测试清理** 清理前已登记实际命令、结果、排障和限制；随后删除本次临时测试、overlay、全部测试输出、源码快照、三份范例源码及编译产物和独立构建缓存。核对任务临时目录及仓库 overlay 目标均不存在，原有五个测试全部保留；AMQP、搜索、XXL-JOB 及其余三类工具的摘要对照通过。API/RPC 仅更新文档，无新增测试或临时产物。
