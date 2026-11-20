@@ -43,7 +43,11 @@
 | 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | Elasticsearch 7、OpenSearch、XXL-JOB 已完成并确认 |
 | 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | 已完成、验证并确认 |
 | 18 | 搜索模型 UUID 旧引用与全量编译恢复 | 已完成、验证并确认 |
-| 19 | 时间工具独立管理、UTC 默认值与日历边界 | 已开发并验证，待确认 |
+| 19 | 时间工具独立管理、UTC 默认值与日历边界 | 已完成、验证并确认 |
+| 20 | RSA 密钥初始化、签名与验签 | 已完成、验证并确认 |
+| 21 | RPC 客户端启动、调用超时与连接配置 | 已完成、验证并确认 |
+| 22 | 通用十进制精度与边界校验 | 已完成、验证并确认 |
+| 23 | 哈希摘要工具与直接标准库依赖 | 已开发并验证，待确认 |
 
 ## 开发记录
 
@@ -797,3 +801,117 @@ rg -n 'TimeToString|DiffTimeUnix|GetNowTime|GetTodayZeroTimeInt|GetYesterdayZero
 
 - **限制** 不执行原有外部服务集成测试，仅编译；未在实际 API/RPC 服务部署或另外安装 Go 1.22 工具链。内置 tzdata 后备通过标准库接入，未删除系统数据以模拟缺失，实际规则版本仍由部署数据或 Go 内置数据决定。无偏移本地字符串不能表达回拨歧义时刻，工具返回错误，需要精确表达时使用带偏移的跨服务协议。工具不提供闰秒、业务工作日或节假日计算，不自动修改业务时区配置。
 - **测试清理** 清理前已登记实际命令、结果和限制；随后删除本轮临时测试、overlay、100 组参考数据、全部测试/构建输出、源码摘要、两份范例源码/编译产物及独立构建缓存。核对任务临时目录和仓库 overlay 目标均不存在，原有五个测试全部保留；除 tool.go 和开发记录外的原有公共包文件摘要一致，包括上一项未提交的 UUID 修复；新增持久文件仅为 time_tool.go 与使用说明。API/RPC 只更新文档，无新增测试或临时产物。
+
+
+### 2026-11-20 / DEV-20261120-009 / RSA 初始化与可复用签名验签
+
+- **用户确认与范围** 第 19 项时间工具已确认，开始第 20 项 RSA。密钥初始化校验一次，签名/验签实例可复用，支持完整 PEM 的四种格式，项目最小 2048 位；保留 SHA256 + RSA PKCS#1 v1.5 和标准 Base64，删除旧接口，补齐使用说明与中文备注。
+- **接口与生命周期** 重写 commonTool/rsaTool.go，新增 NewRSASigner/RSASigner.Sign 与 NewRSAVerifier/RSAVerifier.Verify，删除 GenerateSignature/VerifySignature，当前仓库无业务调用方需迁移。密钥字段私有且初始化后只读，私钥校验并预计算后交给并发调用，不引入可变全局密钥、每次请求解析或兼容包装。nil/零值实例返回 ErrRSAUninitialized，签名失败不返回部分值。
+- **密钥规则** 私钥支持 PKCS#1 RSA PRIVATE KEY、未加密 PKCS#8 PRIVATE KEY，公钥支持 PKIX PUBLIC KEY 和 PKCS#1 RSA PUBLIC KEY。只接受完整唯一 PEM，允许外层空白和 LF/CRLF，拒绝非 RSA、加密类型或 PEM 头属性、多个块、垃圾前缀/尾部和损坏 DER；额外进行 ASN.1 单值检查，补足部分标准库版本 PKCS#8 会忽略外层 DER 尾部的问题。两侧模数至少 2048 位，检查正奇数模数及 3～2^31-1 范围的奇数指数，私钥额外 Validate。
+- **签名与错误** Sign 对原始 data 计算一次 SHA256，固定 PKCS#1 v1.5，输出标准 Base64；空正文合法，不做 JSON/文本归一化。Verify 先按模数限制编码长度，再严格解码、检查解码长度和规范重编码，拒绝换行、空白、缺失填充、非零填充位及 Base64URL 专用字符，阻止超大输入分配。ErrInvalidRSAKey/ErrInvalidRSASignature/ErrRSAUninitialized 支持 errors.Is，内容不匹配保留 rsa.ErrVerification，Base64 等底层错误保留 errors.As 链；公开错误文本仅输出阶段，不包含密钥、签名或正文。
+- **说明与接入** 新建 [RSA 使用说明](commonTool/RSA.md)，包含密钥格式、实例复用、两个完整范例、错误分类、字节协议、轮换和业务状态边界。主范例从环境变量指定的文件读取配对密钥并本地签名验签，不打印密钥/签名。API/RPC 各按职责注入实例，业务约定序列化和重放控制；本轮不新增业务接口或密钥管理服务。
+- **定向验证** 最终 14 组 TestRSATool 及 -race 全部通过：四种格式交叉签名验签、空/中文/二进制/大整数 JSON 原始字节不变；外层空白/CRLF 和全部非法 PEM 包装；加密/属性/错误类型/证书拒绝；ECDSA/Ed25519 非 RSA 拒绝；1024 位、非法指数、偶数模数、损坏私钥数学参数及坏 DER 拒绝；正文/签名篡改与同位数错钥的 rsa.ErrVerification；标准 Base64 编码边界、尾部位、超大输入及底层 CorruptInputError；nil/零值；与标准库互通；本机 openssl（LibreSSL 3.3.6）双向签名/验签及确定性签名字节一致；错误脱敏；32 goroutine 各 16 次共 512 组同实例并发复用；四种 DER 的尾部数据拒绝；3072 位密钥完整成功路径。
+- **执行与排障** 首轮 12 组中 11 组通过，故障私钥样本在辅助函数尝试先编码 PKCS#8 时被标准库以 invalid CRT exponent 提前拒绝，未进入被测构造函数；临时样本改为直接编码故障 PKCS#1 后通过，未为测试绕过生产校验。随后根据标准库源码确认 PKCS#8 尾部检查差异，新增统一单值检查及对应测试，补充 3072 位用例，最终完整 14 组 -race 通过。两个文档 Go 范例抽取编译，main 使用本轮测试密钥实际运行并完成验签；全量构建、全部原有测试编译、gofmt、diff、旧接口检索及本地链接检查通过。
+- **实际命令** 平台根目录执行，独立 GOCACHE=/private/tmp/new-platform-rsa.dk6es3qg/cache、GOPROXY=off，定向设置 RSA_TEST_ARTIFACTS=/private/tmp/new-platform-rsa.dk6es3qg/artifacts。临时测试/overlay、生成的测试密钥和签名、输出、源码摘要、范例源码/产物和缓存均在此任务目录；密钥文件按 0600 写入 0700 临时目录，无外部请求、依赖下载或新依赖。
+
+```text
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-rsa.dk6es3qg/overlay.json -run '^TestRSATool' -count=1 -v ./common-pkg/commonTool -timeout=60s
+openssl dgst -sha256 -sign <临时 artifacts>/test-private.pem -out <临时 artifacts>/openssl.sig <临时 artifacts>/message.bin
+openssl dgst -sha256 -verify <临时 artifacts>/test-public.pem -signature <临时 artifacts>/our.sig <临时 artifacts>/message.bin
+go build -mod=readonly -buildvcs=false -o /private/tmp/new-platform-rsa.dk6es3qg/example_1 /private/tmp/new-platform-rsa.dk6es3qg/example_1.go
+go build -mod=readonly -buildvcs=false -o /private/tmp/new-platform-rsa.dk6es3qg/example_2 /private/tmp/new-platform-rsa.dk6es3qg/example_2.go
+RSA_PRIVATE_KEY_FILE=<临时 artifacts>/test-private.pem RSA_PUBLIC_KEY_FILE=<临时 artifacts>/test-public.pem /private/tmp/new-platform-rsa.dk6es3qg/example_1
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/commonTool/rsaTool.go
+git -C common-pkg diff --check
+git diff --check
+rg -n 'GenerateSignature|VerifySignature' common-pkg --glob '*.go'  （无匹配，退出码 1）
+```
+
+- **限制** 使用本机临时密钥、标准库及 openssl 命令验证，无外部签名协议、密钥托管或部署模式联调，未另外安装 Go 1.22 工具链。原有外部集成测试只编译不执行。工具不处理密钥加密口令、轮换、正文规范化或业务防重放，进程中的密钥生命周期和访问控制由应用管理。
+- **测试清理** 清理前已登记实际命令、结果、首轮临时样本问题和限制；随后删除本轮临时测试、overlay、全部测试密钥/签名/正文、测试和构建输出、源码摘要、两份范例源码/编译产物及独立构建缓存。核对任务临时目录与仓库 overlay 目标均不存在，原有五个测试全部保留；除 rsaTool.go 与开发记录外的原有公共包文件摘要一致，新增持久文件仅为 RSA 使用说明。API/RPC 本轮只更新文档，无新增测试或临时产物。
+
+
+### 2026-11-20 / DEV-20261120-010 / RPC 客户端启动与连接配置
+
+- **用户确认与范围** 第 20 项 RSA 已确认，开始第 21 项 RPC 客户端。独立配置默认调用 10s/启动等待 5s、可选非阻塞、Keepalive 默认关闭，保留现有 Trace/metadata/错误协议，移除硬编码重试并增加幂等 Close。现有 Timeout:10000 未因 go-zero 中间件零值而生效，KeepaliveTime:30000 实际为 30 微秒，本轮显式修正。
+- **配置与默认** 新增 rpc/config.go，Config 改用必填 Target/RpcName，增加 CallTimeout、ConnectTimeout、NonBlock 及独立 KeepaliveConfig。零时长取默认、负值拒绝，非阻塞默认 false；Keepalive.Enabled 默认 false，Time/Timeout 默认 5m/20s，PermitWithoutStream 默认 false，启用时 Time 至少 10s 防止静默最小值修正。Target 拒绝空白/控制字符，RpcName 必须为非空白可打印 ASCII，符合 metadata 值要求；配置值复制不修改原对象，配置及公开接口补齐中文用途/默认值/单位备注。
+- **初始化与生命周期** NewClient(ctx, Config) 返回自有 *Client，仍实现 zrpc.Client，并提供 Conn()/Close()；删除 Config.Host、GenRpcTarget 和旧无 ctx 构造签名，不保留包装。内部通过 go-zero 非阻塞创建以保留解析/负载均衡，再用启动 ctx 和 ConnectTimeout 等待 Ready，失败关闭连接且保留 context 错误链；NonBlock=true 不等待 Ready。成功后的初始化 ctx 取消不关闭实例，MustNewClient 复用 NewClient 并在失败时 panic，不使用进程退出函数。
+- **调用与关闭** 自有一元拦截器为每次调用派生 CallTimeout，保留父级值/取消及更早截止时间，结束释放，不依赖 go-zero 的可选 Timeout 中间件。Close 用 sync.Once/原子关闭标记支持并发重复、nil/零值安全，释放连接并取消在途 RPC，后续一元调用返回 ErrClientClosed；外部已直接关闭 Conn 后仍可安全 Close。关闭不做业务排空，业务先停止新请求并按需等待收尾。
+- **链路与重试** 保留原 ClientInterceptor 函数体，继续复制 metadata、设置 rpc_name 和 W3C 链路、恢复业务错误。删除 RetryDialOption，通过 grpc.WithDisableRetry 关闭服务配置驱动的策略重试，保留 gRPC 未写入/远端未处理场景的透明恢复；连接重连不等同于业务重发。公开启动错误只输出阶段，底层诊断保留错误链，不直接输出 Target。
+- **定向验证** 16 组 TestRPCClient 协议/生命周期测试及 -race 通过，另 1 组 YAML 加载 -race 通过，共 17 组。覆盖缺省/覆盖/非法值及不修改配置、默认 10s 截止/父级优先/值保留/派生释放、nil 与预取消/非法配置/Must panic/零值关闭；Ready 返回、共享单连接及启动 ctx 成功后取消不影响业务；握手不响应的启动超时、较早父级截止/主动取消均检测到 TCP 连接关闭；非阻塞创建与延迟启动服务；客户端预算/父级超时/主动取消及服务端 ctx 取消和 504/499 映射；两级真实 RPC 保持同一 Trace、业务 metadata 和独立 rpc_name、不修改原上下文；409 业务文案及 401 现有公开文案映射。
+- **补充场景** 自定义解析器提供有效三次 UNAVAILABLE 策略，实际业务仅处理一次，证明策略重试已关闭；32 并发 Close、在途取消和 Shutdown/关闭后拒绝；24 并发调用用确定性不同 Trace ID 验证隔离和单连接复用，并启用合法 Keepalive 正常通信；dns/direct 两种目标；NonBlock 的 WaitForReady 等待仍受调用预算并可关闭；原生 Conn 先关后自有 Close。go-zero YAML 显式加载 125ms/350ms/5m/20s，最小配置应用正确默认，避免时长单位退化。
+- **执行与排障** 先在沙箱内编译测试，获准后仅本机回环运行。首次 13 组中 12 组通过，临时测试误以为原生 Unauthenticated 的文案会固定替换成 Unauthorized；核对原 xcode 协议保留该类公开文案后，调整测试服务为显式公开的 authorization required 并按原协议断言，未改错误转换代码。补齐目标解析、连接等待和外部关闭场景后完整 16 组通过，再单独验证 YAML 一组；无产品行为为测试绕过。两段 README Go 范例抽取编译通过，未运行外部服务范例；全量构建、原有测试编译、gofmt、diff、旧入口检索及文档链接检查通过。
+- **范围核对** 按开始时 SHA-256 快照核对，除 rpc/rpcClient.go、删除 RetryDialOption 的文件及开发记录外的原有公共包文件未变；原拦截器函数体按 HEAD 对比完全一致，上一项未提交 RSA 改动和原有五个测试全部保留。API/RPC 子项目仅登记约定，无业务代码或测试产物。
+- **实际命令** 平台根目录执行，独立 GOCACHE=/private/tmp/new-platform-rpc-client.4gwddwq4/cache、GOPROXY=off，无下载或新增依赖。临时 overlay 测试、初次/最终输出、源码摘要、两份抽取范例与编译产物、缓存均在同一任务目录，未创建仓库持久测试。
+
+```text
+go build -mod=readonly -buildvcs=false ./common-pkg/rpc/...
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-rpc-client.4gwddwq4/overlay.json -run '^$' ./common-pkg/rpc
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-rpc-client.4gwddwq4/overlay.json -run '^TestRPCClient' -count=1 -v ./common-pkg/rpc -timeout=45s
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-rpc-client.4gwddwq4/overlay.json -run '^TestRPCClientYAMLConfig$' -count=1 -v ./common-pkg/rpc
+go build -mod=readonly -buildvcs=false -o <临时目录>/example_1 <临时目录>/example_1.go
+go build -mod=readonly -buildvcs=false -o <临时目录>/example_2 <临时目录>/example_2.go
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/rpc/config.go common-pkg/rpc/rpcClient.go common-pkg/rpc/interceptors/clientInterceptor.go
+git -C common-pkg diff --check
+git diff --check
+rg -n 'GenRpcTarget|RetryDialOption|KeepaliveTime: *30000' common-pkg --glob '*.go'  （无匹配，退出码 1）
+```
+
+- **限制与说明** 新建 [RPC 客户端说明](rpc/README.md)，包含默认值、两个完整范例、构造迁移、上下文/重试/关闭语义。只覆盖一元 RPC 的自动预算与现有链路/错误封装，流式 RPC 的上下文由调用方管理；传输沿用既有明文设置，未新增 TLS/凭证配置。Keepalive 检查参数与启用后通信，未等待 5 分钟验证 PING 线上时序；无外部生产发现、认证和代理联调。第三方自定义 resolver 的同步阻塞回调不能被启动 ctx 强制终止，解析器需自行实现时限。原有集成测试只编译未执行，未另装 Go 1.22 工具链。
+- **测试清理** 清理前已登记实际命令、结果、初次测试预期问题和限制；随后删除本轮临时测试、overlay、全部编译/初次/最终测试输出、源码摘要、两份范例源码与编译产物及独立构建缓存。核对任务临时目录与仓库 overlay 目标均不存在，原有五个测试全部保留；除两份本轮 RPC 源码与开发记录外的原有公共包文件摘要一致，原 ClientInterceptor 函数体和上一项 RSA 改动完整保留，新增持久文件仅为 rpc/config.go 与使用说明。API/RPC 子项目只更新文档，无新增测试或临时产物。
+
+
+### 2026-11-20 / DEV-20261120-011 / 通用十进制精度工具
+
+- **用户确认与范围** 第 21 项 RPC 客户端已确认，开始第 22 项通用十进制工具；新建 commonTool/decimal_tool.go，字符串输入/输出、小数位 0～18、输入最多 256 字符、拒绝科学计数法，保持向负无穷取整。删除旧 FloorAmountNum，无兼容包装，不修改其他基础工具或业务结构。
+- **实现** 新增 FloorDecimal(value string, places int) (string, error)，先校验精度与长度，再检查可选正负号、至少一位 ASCII 整数及可选小数点和至少一位小数。支持前导零/正号，拒绝空白、Unicode 数字、NaN/Inf、指数、千位分隔、十六进制及不完整小数；符号和点计入输入上限。校验通过后才将精度转为 int32 并交现有 shopspring/decimal.NewFromString，直接 RoundFloor + StringFixed，不使用 float64、类型转换 cast 或先放大再 Div，不依赖全局 DivisionPrecision。
+- **语义与错误** 输出固定 places 位，0 位返回整数，去掉多余前导零/正号，数值零无负号；负数向负无穷，-1.239 的两位结果为 -1.24，极小负数也按该方向取整。ErrInvalidDecimal 与 ErrInvalidDecimalPlaces 支持 errors.Is，非法时返回空串，不默默修正负位数，不回显原输入或返回可用的部分数值。配置常量、公开接口和关键处理逻辑补齐中文注释；工具无共享可变状态。
+- **迁移与说明** 从 tool.go 移除原 FloorAmountNum 及仅用于该函数的 decimal/cast 导入，Md5 原逻辑保留；当前仓库无业务调用方。新建 [十进制使用说明](commonTool/DECIMAL_TOOL.md)，包含完整格式、符号/精度/长度规则、向下取整样例、两个可编译范例和 JSON 字符串字段接入。API/RPC 业务契约从入口使用精确字符串；本轮不改数据库或业务接口，不恢复上游已经因 float64 丢失的精度。
+- **定向验证** 9 组 TestFloorDecimal 及 -race 全部通过：正负数取整方向、跨整数与极小值；所有 0～18 位固定显示、18 位精确截取及大于 2^53 的整数/小数；符号/前导零/负零规范化；全部非法文本类型（含超大指数）；负数/19/最大和最小 int 精度；恰好 256 字符、257/1MiB 拒绝、符号和小数点计长、254 位极小小数与最长 275 字符输出；错误分类与不回显；Python Decimal（600 位上下文、ROUND_FLOOR）独立生成 1000 组正负/大整数/长小数和 0～18 位参考均一致，再用 math/big.Rat 验证结果不大于输入且差值小于最小精度单位；32 goroutine 各 128 次共 4096 组并发结果保持一致。
+- **构建与核对** 两段当前文档 Go 范例抽取编译通过，主程序实际运行输出与文档四行示例一致。全量构建、全部原有测试编译、gofmt、diff、旧函数检索及本地文档链接检查通过。按开始时 SHA-256 快照核对，除 tool.go 和开发记录外的原有公共包文件均未改动；上一轮尚未提交的 RSA/RPC 修改与原有五个测试全部保留，无依赖新增、下载或 go.mod 调整。
+- **实际命令** 平台根目录执行，独立 GOCACHE=/private/tmp/new-platform-decimal.4pwpkyo0/cache、GOPROXY=off，定向设置 DECIMAL_REFERENCE=/private/tmp/new-platform-decimal.4pwpkyo0/reference.json。临时 overlay 测试、1000 组参考、测试/构建输出、源码摘要、抽取范例及产物、缓存均在同一任务目录，未创建仓库持久测试。
+
+```text
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-decimal.4pwpkyo0/overlay.json -run '^TestFloorDecimal' -count=1 -v ./common-pkg/commonTool -timeout=45s
+go build -mod=readonly -buildvcs=false -o /private/tmp/new-platform-decimal.4pwpkyo0/example_1 /private/tmp/new-platform-decimal.4pwpkyo0/example_1.go
+go build -mod=readonly -buildvcs=false -o /private/tmp/new-platform-decimal.4pwpkyo0/example_2 /private/tmp/new-platform-decimal.4pwpkyo0/example_2.go
+/private/tmp/new-platform-decimal.4pwpkyo0/example_1
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/commonTool/tool.go common-pkg/commonTool/decimal_tool.go
+git -C common-pkg diff --check
+git diff --check
+rg -n 'FloorAmountNum' common-pkg --glob '*.go'  （无匹配，退出码 1）
+```
+
+- **限制** 公共工具只处理有界普通十进制文本的向负无穷取整，不实现其他舍入模式、单位换算或业务数据迁移；科学计数法不自动展开。原有外部集成测试只编译未执行，未接入实际 API/RPC DTO/存储协议或另装 Go 1.22 工具链；上游已丢失精度无法恢复，需要业务从源头统一表示。
+- **测试清理** 清理前已登记实际命令、结果和限制；随后删除本轮临时测试、overlay、1000 组参考、全部测试/构建输出、源码摘要、两份范例源码及编译产物、运行输出和独立构建缓存。核对任务临时目录与仓库 overlay 目标均不存在，原有五个测试全部保留；除 tool.go 和开发记录外的原有公共包文件摘要一致，包括此前未提交的 RSA/RPC 工作；新增持久文件仅为 decimal_tool.go 和使用说明。API/RPC 子项目只更新约定，无新增测试或临时产物。
+
+
+### 2026-11-20 / DEV-20261120-012 / 独立哈希摘要工具
+
+- **用户确认与范围** 第 22 项十进制工具已确认，开始第 23 项哈希摘要整理；独立 hash_tool.go 提供 MD5Hex/SHA256Hex，字节切片输入、小写十六进制输出，空输入合法，删除旧 Md5 及只包含该函数的 tool.go，无兼容包装。当前仓库无旧函数调用方，不修改其他基础工具或业务协议。
+- **实现与备注** 分别直接调用标准库 md5.Sum/sha256.Sum256，再 hex.EncodeToString，输出 32/64 个字符。避免依赖 crypto.Hash.New 间接注册，不修改输入、不去空白/换行、不进行 Unicode 或 JSON 归一化，nil 与空切片返回同一空内容摘要。函数无共享可变状态，可并发调用，调用方不并发改写同一输入；公开接口补齐用途、编码、输入所有权及 MD5 运行限制的中文注释。旧实现当前可由 TLS 间接引入 MD5 注册，未将其描述为现有调用必然 panic。
+- **使用边界与说明** 新建 [哈希摘要说明](commonTool/HASH_TOOL.md)，包含两个接口、完整 main 范例、精确输出、原始字节协议及旧调用迁移。MD5 仅用于协议指定的非安全校验，不用于密码存储或认证签名；SHA256 为内容摘要，不替代来源认证。Go FIPS 只允许模式禁用 MD5 时继承标准库 panic，不 recover、不静默更换算法；本轮不调整部署模式或现有认证流程。
+- **定向验证** 6 组 TestHashTool 及 -race 全部通过：MD5 七组标准向量；SHA256 空串、abc、多块及百万字符四组向量；nil/空切片与固定长度；Python hashlib 独立生成的 128 组参考，包括中文、Unicode 组合/分解形式、二进制全部 256 个字节、NUL/非法 UTF-8、空白/换行、55/56/63/64/65/119/120/127/128/129 字节分块边界及 1024/4096 字节和确定性随机内容，两个算法均一致且为小写 hex；输入切片不变及计算完成后改写原切片不影响已返回结果，换行保留；32 goroutine 各 128 次共 4096 组并发双算法结果稳定。
+- **构建与核对** 一段当前文档 Go 范例抽取编译并实际运行，两行输出与文档一致。全量构建、全部原有测试编译、gofmt、diff、旧函数检索及本地链接检查通过。按开始时 SHA-256 快照核对，除删除 tool.go 和更新开发记录外的原有公共包文件未变，之前尚未提交的 RSA/RPC/十进制工作及原有五个测试全部保留，无依赖下载或新增依赖。
+- **实际命令** 平台根目录执行，独立 GOCACHE=/private/tmp/new-platform-hash.4ri5dx3d/cache、GOPROXY=off，定向设置 HASH_REFERENCE=/private/tmp/new-platform-hash.4ri5dx3d/reference.json。临时 overlay 测试、128 组参考、测试/构建输出、源码摘要、抽取范例/编译产物及缓存均在同一任务目录，仓库未写入新测试文件。
+
+```text
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-hash.4ri5dx3d/overlay.json -run '^TestHashTool' -count=1 -v ./common-pkg/commonTool -timeout=45s
+go build -mod=readonly -buildvcs=false -o /private/tmp/new-platform-hash.4ri5dx3d/example /private/tmp/new-platform-hash.4ri5dx3d/example.go
+/private/tmp/new-platform-hash.4ri5dx3d/example
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/commonTool/hash_tool.go
+git -C common-pkg diff --check
+git diff --check
+rg -n '\bMd5\s*\(' . --glob '*.go'  （无匹配，退出码 1）
+```
+
+- **限制** 仅正常 Go 运行模式验证，未执行 FIPS 模式认证/部署验证，未另装 Go 1.22 工具链；MD5 在禁止该算法的环境中遵循标准库拒绝行为。摘要函数只处理传入字节，不执行 I/O、密码存储、来源认证或业务协议自动迁移。原有外部服务集成测试只编译未执行，API/RPC 本轮只更新接入约定。
+- **测试清理** 清理前已登记实际命令、结果和限制；随后删除本轮临时测试、overlay、128 组参考、全部测试/构建输出、源码摘要、范例源码与编译产物、运行输出及独立构建缓存。核对任务临时目录和仓库 overlay 目标均不存在，原有五个测试全部保留；除删除 tool.go 与更新开发记录外的原有公共包文件摘要一致，包括此前未提交的 RSA/RPC/十进制工作；新增持久文件仅为 hash_tool.go 和使用说明。API/RPC 子项目只更新约定，无新增测试或临时产物。

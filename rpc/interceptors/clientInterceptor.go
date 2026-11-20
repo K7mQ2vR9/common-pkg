@@ -33,18 +33,3 @@ func ClientInterceptor(rpcName string) grpc.UnaryClientInterceptor {
 		return xcode.FromGRPCError(err)
 	}
 }
-
-func RetryDialOption() grpc.DialOption {
-	retryPolicy := `{
-		"methodConfig": [{
-		  "retryPolicy": {
-			  "MaxAttempts": 3,
-			  "InitialBackoff": "1s",
-			  "MaxBackoff": "1s",
-			  "BackoffMultiplier": 1.0,
-			  "RetryableStatusCodes": [ "UNAVAILABLE" ]
-		  }
-		}]}`
-
-	return grpc.WithDefaultServiceConfig(retryPolicy)
-}
