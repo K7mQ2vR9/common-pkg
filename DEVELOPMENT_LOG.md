@@ -41,7 +41,7 @@
 | 14 | gRPC 客户端成功分支、服务端认证和状态码 | 已完成、验证并确认 |
 | 15 | RabbitMQ 队列绑定、重连和重新订阅 | 已实现重试、TG 通知、统一链路、处理超时、业务消息接口、消费错误分类和终态双份确认，已验证；后续完善逐项确认 |
 | 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | Elasticsearch 7、OpenSearch、XXL-JOB 已完成并确认 |
-| 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | HTTP 请求已完成并确认；随机字符串已开发并验证，待确认；TOTP URI 和 Redis 分片工具待处理 |
+| 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | HTTP 请求、随机字符串已完成并确认；TOTP 已完成定向验证，待确认；Redis 分片工具待处理 |
 
 ## 开发记录
 
@@ -683,3 +683,33 @@ rg -n 'GenerateRandomString|rand.Seed' common-pkg --glob '*.go'
 
 - **已知限制** 故障源经内部读取函数注入，未替换全局 crypto/rand.Reader 或人为破坏系统熵源；真实公开接口使用本机系统随机源验证。部分 Go 版本的系统熵源发生底层致命故障会终止进程，本工具只传播以 error 返回的失败，不捕获运行时致命退出；当前工具链为 go1.26.5，模块基线 go1.22，未另装旧工具链运行。定向测试验证字符映射和拒绝逻辑，不构成对操作系统随机性的统计认证；原有外部服务集成测试只编译，未连接外部服务。
 - **测试清理** 已在清理前登记实际命令、结果和限制，随后删除本次临时测试、overlay、测试输出、源码快照、文档范例源码/二进制及独立构建缓存。核对任务临时目录和仓库 overlay 目标均不存在，原有五个测试全部保留；无关原有文件 SHA-256 摘要一致，公共包新增文件仅为随机工具源码及使用说明。API/RPC 仅更新文档，无新增测试或临时产物。
+
+
+### 2026-11-20 / DEV-20261120-005 / TOTP 密钥、URI 与校验
+
+- **用户确认与范围** 随机字符串已确认，继续第 17 项 TOTP；固定 HMAC-SHA1、六位、30 秒，接受当前及上一个窗口，不计算未来窗口。删除旧接口，统一密钥生成、URI 和字符串验证码校验，不修改 Redis 分片或其他工具。
+- **接口与密钥** 删除 google_code.go 的 GenGoogleAuthSecret、BuildGoogleQR、CheckGoogleAuthCode 及三个旧私有转换/计算函数，新增 totp.go 的 GenerateTOTPSecret、BuildTOTPURI、VerifyTOTP，无兼容包装。新密钥由 crypto/rand.Reader 读取 20 字节，直接 Base32 编码为 32 个大写无填充字符；读源失败不返回部分值并保留错误链。输入密钥统一严格校验字母表、无填充和规范尾部位，拒绝空值、小写、空白、CR/LF 和非法编码，按 RFC 4226 最小要求解码后至少 16 字节；生成仍采用推荐的 20 字节。配置常量、公开接口、错误及关键流程补齐中文注释。
+- **URI** account/issuer 必填、非纯空白、有效 UTF-8，不含冒号或控制字符，保留原值。net/url 分别编码标签与查询，RawPath 保护嵌入斜杠，空格按 %20 编码，发行方前缀与 issuer 参数一致；固定 algorithm=SHA1/digits=6/period=30。只返回 otpauth URI，不生成图片或访问二维码服务，错误文本不输出账号、密钥或 URI。
+- **校验与错误** VerifyTOTP 接收字符串，严格六位 ASCII 数字，保留前导零，不自动补零或清理空白。一次读取服务端时间，8 字节大端计数器和 RFC 动态截断，当前及前一候选均做常量时间比较，不提前命中返回；起始窗口避免减一下溢，负 Unix 时间拒绝。ErrInvalidTOTPSecret、ErrInvalidTOTPCode、ErrTOTPMismatch 支持 errors.Is。工具无状态且可并发，重复消费、尝试次数限制及绑定确认由业务原子处理。
+- **说明与接入** 新建 [TOTP 使用说明](commonTool/TOTP.md)，包含密钥规则、URI 编码、窗口边界、两个完整 Go 范例、错误分类及 API/RPC 状态管理职责；URI 按密钥保护并交本地二维码组件，绑定需首次校验确认，RPC 负责受控状态存取，API 编排。当前仓库无旧接口业务调用方，源码检索无旧函数残留；API/RPC 只登记接入约定。
+- **定向验证** 12 组 TestTOTP 及 -race 全部通过：确定性随机字节编码和真实系统生成；短读、EOF、UnexpectedEOF 和注入故障不返回前缀；16/20/32/64 字节密钥及全部非法格式/非规范填充位；中文/空格/斜杠/加号/百分号/查询字符 URI 往返和五个参数唯一性；非法标签；RFC 4226 十组六位向量；RFC 6238 六组 SHA1 向量按固定六位取末六位，覆盖前导零及 2038 年后；Python 标准库 hmac/hashlib/struct/base64 独立生成 40 组参考结果（四种密钥长度、十个时间点，含计数器超过 32 位）；当前/上一/未来/过旧窗口、Unix 起点、秒/时区边界及负时间；输入格式及错误脱敏；公开接口和重复调用保持无状态；64 goroutine 各 8 次共 512 组生成/URI/校验及竞态检查。两段当前文档 Go 范例编译通过。
+- **全量检查与既有失败** commonTool 包单独构建通过，未受影响的四个原有测试包及 language-pkg 测试编译通过。全量构建与原有测试编译失败：es/esv7/model/es_model.go:75 和 es/esaws/model/es_model.go:83 仍调用已不存在的 commonTool.GenUUID，连带 es/test 无法编译。以 HEAD 原 google_code.go 字节建立基线 overlay、隐藏本轮 totp.go 后再次全量构建，同样两处失败；原文件与本轮开始快照哈希一致，确认问题在任务前已存在。本轮未改动搜索或恢复旧 UUID 接口，不把全量失败记为通过；该问题后续单独讨论处理。
+- **实际命令** 平台根目录执行，独立 GOCACHE=/private/tmp/new-platform-totp.izj61k8k/cache、GOPROXY=off；定向设置 TOTP_REFERENCE=/private/tmp/new-platform-totp.izj61k8k/reference.json。临时测试和两个 overlay、Python 参考数据、测试/构建输出、原源码快照、抽取范例与产物、缓存都在此任务目录，无依赖下载或新增依赖。
+
+```text
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-totp.izj61k8k/overlay.json -run '^TestTOTP' -count=1 -v ./common-pkg/commonTool -timeout=45s
+go build -mod=readonly -buildvcs=false -o /private/tmp/new-platform-totp.izj61k8k/example_1 /private/tmp/new-platform-totp.izj61k8k/example_1.go
+go build -mod=readonly -buildvcs=false -o /private/tmp/new-platform-totp.izj61k8k/example_2 /private/tmp/new-platform-totp.izj61k8k/example_2.go
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...  （失败：既有 GenUUID 缺失）
+go test -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/... -run '^$' -count=1  （同一既有编译失败）
+go build -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-totp.izj61k8k/baseline-overlay.json ./common-pkg/... ./language-pkg/...  （还原原 TOTP 后重现同一失败）
+go build -mod=readonly -buildvcs=false ./common-pkg/commonTool
+go test -mod=readonly -buildvcs=false ./common-pkg/commonTool ./common-pkg/aesGCM ./common-pkg/es/esv7/core ./common-pkg/es/esaws/core ./language-pkg/... -run '^$' -count=1
+gofmt -l common-pkg/commonTool/totp.go
+git -C common-pkg diff --check
+git diff --check
+rg -n 'GenGoogleAuthSecret|BuildGoogleQR|CheckGoogleAuthCode|oneTimePassword|func toBytes|func toUint32' common-pkg --glob '*.go'  （无匹配，退出码 1）
+```
+
+- **限制** 本机系统随机源、标准向量及故障注入验证，无真实认证器扫码、部署时钟或外部业务联调。读源故障经内部函数注入，未替换全局随机源；Go 系统熵源的致命退出不转换为普通错误，未另装 Go 1.22 工具链验证。格式正确后的候选比较为常量时间，输入校验和整个函数不宣称恒定耗时；不保存使用状态或实现业务限流。原有集成测试未执行，仅尝试编译，全量失败如上登记。
+- **测试清理** 清理前已登记实际命令、结果、基线失败及限制；随后删除本轮临时测试、两个 overlay、Python 参考数据、全部测试/构建输出、原源码快照、两份范例源码和编译产物及独立构建缓存。核对任务临时目录及仓库 overlay 目标均不存在，原有五个测试全部保留；除删除旧 TOTP 源码及更新开发记录外，全部原有公共包文件摘要一致，新增文件仅为 totp.go 和使用说明。API/RPC 本轮只更新文档，无新增测试或临时产物。
