@@ -41,7 +41,7 @@
 | 14 | gRPC 客户端成功分支、服务端认证和状态码 | 已完成、验证并确认 |
 | 15 | RabbitMQ 队列绑定、重连和重新订阅 | 已实现重试、TG 通知、统一链路、处理超时、业务消息接口、消费错误分类和终态双份确认，已验证；后续完善逐项确认 |
 | 16 | 搜索客户端 TLS 与响应体关闭、XXL-JOB 监听生命周期 | Elasticsearch 7、OpenSearch、XXL-JOB 已完成并确认 |
-| 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | HTTP 请求、随机字符串已完成并确认；TOTP 已完成定向验证，待确认；Redis 分片工具待处理 |
+| 17 | HTTP 请求、随机字符串、TOTP URI 和 Redis 分片工具 | HTTP 请求、随机字符串、TOTP 已完成并确认；Redis 分片已开发并完成定向验证，待确认 |
 
 ## 开发记录
 
@@ -713,3 +713,30 @@ rg -n 'GenGoogleAuthSecret|BuildGoogleQR|CheckGoogleAuthCode|oneTimePassword|fun
 
 - **限制** 本机系统随机源、标准向量及故障注入验证，无真实认证器扫码、部署时钟或外部业务联调。读源故障经内部函数注入，未替换全局随机源；Go 系统熵源的致命退出不转换为普通错误，未另装 Go 1.22 工具链验证。格式正确后的候选比较为常量时间，输入校验和整个函数不宣称恒定耗时；不保存使用状态或实现业务限流。原有集成测试未执行，仅尝试编译，全量失败如上登记。
 - **测试清理** 清理前已登记实际命令、结果、基线失败及限制；随后删除本轮临时测试、两个 overlay、Python 参考数据、全部测试/构建输出、原源码快照、两份范例源码和编译产物及独立构建缓存。核对任务临时目录及仓库 overlay 目标均不存在，原有五个测试全部保留；除删除旧 TOTP 源码及更新开发记录外，全部原有公共包文件摘要一致，新增文件仅为 totp.go 和使用说明。API/RPC 本轮只更新文档，无新增测试或临时产物。
+
+
+### 2026-11-20 / DEV-20261120-006 / Redis 逻辑分片错误处理
+
+- **用户确认与范围** 第 17 项最后处理 Redis 分片，TOTP 已确认。只调整 ShardIndexXX/ShardTagXX 的错误返回和说明；分片数必须显式大于 0，不设默认，合法参数路由保持不变。上轮既有 GenUUID 编译问题另列处理，不混入本轮。
+- **接口与错误** 两个函数增加 error 返回，参数 n 改名 shardCount；新增 ErrInvalidShardCount，零分片时索引返回 0、标签返回空串且支持 errors.Is，不再发生除零 panic，也不静默选用默认桶。ShardTagXX 先传播索引错误，成功后保持 {s%03d} 格式。删除旧签名，无兼容包装；当前仓库无业务调用方需要迁移。
+- **路由语义与注释** 保留有符号十进制用户 ID 文本的 xxhash64 取模，支持全部 int64 ID 和非零 uint64 桶数，返回索引在 [0, shardCount)。标签至少三位，超过三位自然扩展。补齐接口和关键逻辑中文注释，明确业务桶数、Redis 槽和节点的区别，同标签同槽、不同标签可同槽，以及变更桶数的迁移影响。
+- **使用说明** 新建 [Redis 分片使用说明](commonTool/REDIS_SHARDS.md)，包含新签名、错误处理、固定算法、完整关联 key 范例及配置/迁移约定。范例同时保留逻辑桶标签和用户 ID，防止同桶不同用户覆盖 key；固定前缀避免花括号改变 Redis 标签解析。工具只计算索引/标签，不选择节点、访问 Redis 或迁移数据；API 继续通过 RPC 编排，实际数据存取方统一管理分片配置。
+- **定向验证** 6 组 TestRedisShards 及 -race 通过。先抽取本轮修改前原函数执行，记录 11 个用户 ID（含最小/最大 int64、0、负数及超过浮点精确范围值）与 11 个桶数（含 1、999/1000/1001、16384/16385、2^63、最大 uint64）的 121 组索引和标签，再逐项验证新实现完全一致。覆盖所有代表 ID 的零桶错误和 errors.Is、单桶固定 0/{s000}、10000 个输入的索引范围/标签形状及数值一致性、大编号无截断/溢出，以及 64 goroutine 各 128 次共 8192 组并发稳定路由。使用修改前结果作回归基准，没有靠重复实现同一哈希公式生成预期。
+- **构建与既有问题** 使用说明的一段 Go 范例编译、commonTool 单独构建、四个未受影响原有测试包及 language-pkg 测试编译通过；gofmt、diff 和文档本地链接检查通过。全量构建仍失败于 es/esv7/model/es_model.go:75 与 es/esaws/model/es_model.go:83 对已删除 commonTool.GenUUID 的调用，与上轮已还原基线复核的问题一致；搜索源码按任务开始摘要核对未改，不恢复旧接口、不将全量失败记为通过。本轮未重复运行已知无法编译的 es/test 集成测试。
+- **实际命令** 在平台根目录执行，独立 GOCACHE=/private/tmp/new-platform-shards.ks0fb_be/cache、GOPROXY=off；定向设置 SHARDS_GOLDEN=/private/tmp/new-platform-shards.ks0fb_be/golden.json。原函数抽取程序、121 组结果、overlay 测试/配置、测试和构建输出、源码摘要、文档范例源码/产物及缓存均在此任务目录，无依赖下载或新依赖。
+
+```text
+go run -mod=readonly -buildvcs=false /private/tmp/new-platform-shards.ks0fb_be/baseline.go  （原函数产生 golden.json）
+go test -race -mod=readonly -buildvcs=false -overlay=/private/tmp/new-platform-shards.ks0fb_be/overlay.json -run '^TestRedisShards' -count=1 -v ./common-pkg/commonTool -timeout=45s
+go build -mod=readonly -buildvcs=false -o /private/tmp/new-platform-shards.ks0fb_be/example /private/tmp/new-platform-shards.ks0fb_be/example.go
+go build -mod=readonly -buildvcs=false ./common-pkg/... ./language-pkg/...  （失败：既有 GenUUID 缺失）
+go test -mod=readonly -buildvcs=false ./common-pkg/commonTool ./common-pkg/aesGCM ./common-pkg/es/esv7/core ./common-pkg/es/esaws/core ./language-pkg/... -run '^$' -count=1
+go build -mod=readonly -buildvcs=false ./common-pkg/commonTool
+gofmt -l common-pkg/commonTool/redis_shards.go
+git -C common-pkg diff --check
+git diff --check
+rg -n 'ShardIndexXX|ShardTagXX' common-pkg --glob '*.go'
+```
+
+- **限制** 纯函数、原路由样本与并发验证，不连接真实 Redis 集群，不验证实际负载热点或执行数据迁移。原有外部集成测试未执行，相关编译检查仅使用 -run '^$'；全量构建限制如上登记。API/RPC 本轮只更新约定，无业务代码或测试产物。
+- **测试清理** 清理前已登记实际命令、结果和既有失败；随后删除本次原函数抽取程序、121 组结果、临时测试及 overlay、全部测试/构建输出、源码摘要、范例源码/编译产物及独立构建缓存。核对任务临时目录及仓库 overlay 目标均不存在，原有五个测试全部保留；除 redis_shards.go 与开发记录外，原有公共包文件摘要一致，新增文件仅为使用说明。API/RPC 本轮只更新文档，无新增测试或临时产物。
